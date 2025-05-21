@@ -25,7 +25,6 @@ RUN dnf update -y && \
         gcc \
         gcc-c++ \
         git \
-        curl \
         unzip \
         procps-ng \
         shadow-utils \
