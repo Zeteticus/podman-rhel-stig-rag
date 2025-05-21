@@ -66,8 +66,8 @@ if [ -f "/proc/1/cgroup" ]; then\n\
 fi\n\
 # Run the application\n\
 exec python3 /app/rhel_stig_rag.py\n\
-' > /app/start.sh && \
-    chmod +x /app/start.sh
+' > start.sh && \
+    chmod +x start.sh
 
 # Switch to non-root user
 USER stigrag
@@ -92,4 +92,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=5 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Default command using the wrapper script
-CMD ["/app/start.sh"]
+CMD ["./start.sh"]
