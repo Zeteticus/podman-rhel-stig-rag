@@ -1,0 +1,56 @@
+# Quadlet Container Definition for RHEL STIG RAG
+# For RHEL 9 and newer systems with systemd 250+
+# Place in ~/.config/containers/systemd/
+
+[Unit]
+Description=RHEL STIG RAG Container
+Documentation=https://github.com/your-username/podman-rhel-stig-rag
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=%t/containers
+
+[Container]
+# Image configuration
+Image=localhost/rhel-stig-rag:latest
+ContainerName=stig-rag
+PodmanArgs=--pod=stig-rag-pod
+
+# Environment variables (update paths as needed)
+EnvironmentFile=%h/stig-rag-data/config.env
+
+# Resource limits
+Memory=4g
+CPUQuota=200%
+PidsLimit=1024
+
+# Volume mounts
+Volume=%h/stig-rag-data/stig_data:/app/stig_data:Z
+Volume=%h/stig-rag-data/stig_chroma_db:/app/stig_chroma_db:Z
+Volume=%h/stig-rag-logs:/app/logs:Z
+
+# Security configuration
+DropCapability=ALL
+SecurityLabelDisable=false
+ReadOnly=false
+
+# Health check
+HealthCmd=curl -f http://localhost:8000/health || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=60s
+HealthTimeout=10s
+
+# Logging
+LogDriver=journald
+
+# Labels
+Label=app=stig-rag
+Label=version=1.0.0
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=90
+TimeoutStopSec=70
+
+[Install]
+WantedBy=default.target
