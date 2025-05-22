@@ -1,0 +1,37 @@
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Environment variable for container compatibility
+ENV _CONTAINERS_USERNS_CONFIGURED=1
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN microdnf update -y && \
+    microdnf install -y python3 python3-pip procps-ng && \
+    microdnf clean all
+
+# Setup application directory
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY minimal_app.py /app/app.py
+
+# Copy the startup script (FIXED APPROACH)
+COPY container_start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Create necessary directories
+RUN mkdir -p /app/stig_data /app/stig_chroma_db /app/logs
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run application using the start script
+CMD ["/app/start.sh"]

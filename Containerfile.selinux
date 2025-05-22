@@ -1,0 +1,27 @@
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Environment variables
+ENV _CONTAINERS_USERNS_CONFIGURED=1
+ENV PYTHONUNBUFFERED=1
+
+# Install packages
+RUN microdnf update -y && \
+    microdnf install -y python3 python3-pip && \
+    microdnf clean all
+
+WORKDIR /app
+
+# Copy and install requirements
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY minimal_app.py /app/app.py
+COPY container_start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Create directories
+RUN mkdir -p /app/stig_data /app/stig_chroma_db /app/logs
+
+EXPOSE 8000
+CMD ["/app/start.sh"]
