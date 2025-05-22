@@ -1,27 +1,12 @@
-# RHEL STIG RAG Assistant - Complete Requirements
-# Core Framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
+# Core Web Framework
+fastapi==0.104.0
+uvicorn==0.24.0
+pydantic==2.4.2
+
+# Web Interface Components
 jinja2==3.1.2
+python-multipart==0.0.6
 
-# RAG Components
-chromadb==0.4.15
-sentence-transformers==2.2.2
-openai==1.3.0
-langchain==0.0.340
-
-# Data Processing
+# Basic Utilities
 requests==2.31.0
-lxml==4.9.3
-xmltodict==0.13.0
-
-# Utilities
 python-dotenv==1.0.0
-pydantic==2.5.0
-pathlib2==2.3.7
-
-# Optional: Enhanced features
-numpy==1.24.3
-pandas==2.0.3
-scikit-learn==1.3.0
