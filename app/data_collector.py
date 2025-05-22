@@ -21,14 +21,14 @@ class STIGDataCollector:
         # Common STIG download URLs (these may change) - RHEL 9 prioritized
         self.stig_sources = {
             "rhel9": {
-                "url": "https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_RHEL_9_STIG_V1R3_Manual-xccdf.xml.zip",
-                "filename": "rhel9_stig.zip",
+                "url": "https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_RHEL_9_V2R4_STIG.zip",
+                "filename": "U_RHEL_9_V2R4_STIG.zip",
                 "priority": 1,
                 "version": "9"
             },
             "rhel8": {
-                "url": "https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_RHEL_8_STIG_V1R12_Manual-xccdf.xml.zip",
-                "filename": "rhel8_stig.zip", 
+                "url": "https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_RHEL_8_V2R3_STIG.zip",
+                "filename": "U_RHEL_8_V2R3_STIG.zip", 
                 "priority": 2,
                 "version": "8"
             }
