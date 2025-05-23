@@ -1,27 +1,98 @@
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+# Use Red Hat UBI as base for better RHEL compatibility
+FROM registry.access.redhat.com/ubi9/ubi:latest
 
-# Environment variables
+# Add environment variable for container namespaces
 ENV _CONTAINERS_USERNS_CONFIGURED=1
-ENV PYTHONUNBUFFERED=1
 
-# Install packages
-RUN microdnf update -y && \
-    microdnf install -y python3 python3-pip && \
-    microdnf clean all
+# Metadata
+LABEL name="rhel-stig-rag" \
+      version="2.0.0" \
+      description="RHEL STIG RAG System with Data Loading - Podman Container" \
+      maintainer="stig-rag-team" \
+      io.opencontainers.image.title="RHEL STIG RAG System Enhanced" \
+      io.opencontainers.image.description="AI-powered RHEL STIG compliance assistant with real data loading" \
+      io.opencontainers.image.version="2.0.0"
 
+# Set working directory
 WORKDIR /app
 
-# Copy and install requirements
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# Install system dependencies
+RUN dnf update -y && \
+    dnf install -y \
+        python3 \
+        python3-pip \
+        python3-devel \
+        gcc \
+        gcc-c++ \
+        git \
+        unzip \
+        procps-ng \
+        shadow-utils \
+        sqlite \
+        && dnf clean all \
+        && rm -rf /var/cache/dnf
 
-# Copy application
-COPY minimal_app.py /app/app.py
-COPY container_start.sh /app/start.sh
-RUN chmod +x /app/start.sh
+# Create non-root user for security with specific UID/GID for better compatibility
+RUN useradd -r -u 1001 -g 0 -m -d /app -s /bin/bash stigrag && \
+    chown -R stigrag:0 /app && \
+    chmod -R g=u /app
 
-# Create directories
-RUN mkdir -p /app/stig_data /app/stig_chroma_db /app/logs
+# Create Python virtual environment to avoid RPM package conflicts
+RUN python3 -m venv /app/venv && \
+    chown -R stigrag:0 /app/venv
 
+# Copy requirements first for better layer caching
+COPY --chown=stigrag:0 requirements.txt /app/
+
+# Install Python dependencies in virtual environment
+RUN source /app/venv/bin/activate && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application code (the enhanced version)
+COPY --chown=stigrag:0 enhanced_app.py /app/rhel_stig_rag.py
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/stig_data /app/stig_chroma_db /app/logs /app/tmp /app/templates && \
+    chown -R stigrag:0 /app && \
+    chmod -R g+w /app
+
+# Create runtime script that activates virtual environment
+RUN echo '#!/bin/bash\n\
+# Startup wrapper with virtual environment activation\n\
+echo "Starting Enhanced RHEL STIG RAG system..."\n\
+source /app/venv/bin/activate\n\
+if [ -f "/proc/1/cgroup" ]; then\n\
+  echo "Container cgroups configuration:"\n\
+  grep -v "^\#" /proc/1/cgroup | sort\n\
+fi\n\
+# Run the application\n\
+exec python /app/rhel_stig_rag.py\n\
+' > start.sh && \
+    chmod +x start.sh
+
+# Switch to non-root user
+USER stigrag
+
+# Set environment variables including virtual environment
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    HOME=/app \
+    PORT=8000 \
+    MALLOC_ARENA_MAX=2 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    ENABLE_CGROUPS_COMPAT=1 \
+    PATH="/app/venv/bin:$PATH"
+
+# Expose port
 EXPOSE 8000
-CMD ["/app/start.sh"]
+
+# Health check with retry logic and timeout adjustments
+HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=5 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command using the wrapper script
+CMD ["./start.sh"]
