@@ -445,6 +445,94 @@ async def view_control_details(request: Request, stig_id: str):
     return HTMLResponse(content=details_html)
 
 
+
+@app.get("/control/{stig_id}", response_class=HTMLResponse)
+async def view_control_details(request: Request, stig_id: str):
+    """View complete control details"""
+    control_data = stig_loader.get_control_by_id(stig_id)
+    
+    if not control_data:
+        error_html = f"""
+        <!DOCTYPE html>
+        <html><head><title>Control Not Found</title></head>
+        <body style="font-family: Arial, sans-serif; margin: 50px; background: #f5f5f5;">
+            <div style="max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px;">
+                <h1 style="color: #e53e3e;">❌ Control Not Found</h1>
+                <p>STIG control <code>{stig_id}</code> was not found.</p>
+                <a href="/" style="color: #1976d2; text-decoration: none; font-weight: bold;">← Back to Search</a>
+            </div>
+        </body></html>
+        """
+        return HTMLResponse(content=error_html)
+    
+    title = control_data.get('title', 'No title available')
+    description = control_data.get('description', 'No description available')
+    check = control_data.get('check', 'No check procedure available')
+    fix = control_data.get('fix', 'No fix procedure available')
+    severity = control_data.get('severity', 'Unknown')
+    rhel_version = control_data.get('rhel_version', 'Unknown')
+    
+    details_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>{stig_id} - STIG Control Details</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
+            .container {{ max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }}
+            .header {{ background: #e53e3e; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+            .section {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #007bff; }}
+            .metadata {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }}
+            .meta-item {{ background: #e8f5e8; padding: 15px; border-radius: 6px; text-align: center; }}
+            .back-link {{ display: inline-block; background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/" class="back-link">← Back to Search</a>
+            
+            <div class="header">
+                <h1>🛡️ {stig_id}</h1>
+                <h2>{title}</h2>
+            </div>
+            
+            <div class="metadata">
+                <div class="meta-item">
+                    <strong>Severity</strong><br>
+                    <span style="color: #e53e3e; font-size: 18px; font-weight: bold;">{severity.upper()}</span>
+                </div>
+                <div class="meta-item">
+                    <strong>RHEL Version</strong><br>
+                    <span style="color: #e53e3e; font-size: 18px; font-weight: bold;">RHEL {rhel_version}</span>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3>📋 Description</h3>
+                <p>{description}</p>
+            </div>
+            
+            <div class="section">
+                <h3>🔍 Check Procedure</h3>
+                <p>{check}</p>
+            </div>
+            
+            <div class="section">
+                <h3>🔧 Fix Implementation</h3>
+                <p>{fix}</p>
+            </div>
+            
+            <div style="text-align: center; margin-top: 30px; padding: 20px; background: #e8f5e8; border-radius: 8px;">
+                <a href="/" style="color: #e53e3e; text-decoration: none; font-weight: bold;">Ask Another Question →</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return HTMLResponse(content=details_html)
+
+
 @app.get("/health")
 def health_check():
     return {
