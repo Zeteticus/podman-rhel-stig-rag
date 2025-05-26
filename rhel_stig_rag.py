@@ -250,68 +250,278 @@ class EnhancedSTIGDataLoader:
         self.search_index = {}
 
         for control_id, control_data in stig_data.items():
-            searchable_text = self._create_searchable_text(control_id, control_data).lower()
+            # Create enhanced searchable text with field separation
+            searchable_text = self._create_enhanced_searchable_text(control_id, control_data).lower()
             words = re.findall(r'\b\w+\b', searchable_text)
-            for word in words:
+            
+            # Filter out very common words and short words for better indexing
+            stop_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+            meaningful_words = [word for word in words if len(word) > 2 and word not in stop_words]
+            
+            for word in meaningful_words:
                 if word not in self.search_index:
                     self.search_index[word] = []
                 if control_id not in self.search_index[word]:
                     self.search_index[word].append(control_id)
 
         self.data_loaded = True
-        logger.info(f"Indexed {len(stig_data)} STIG controls")
+        logger.info(f"Indexed {len(stig_data)} STIG controls with enhanced search algorithm")
 
-    def _create_searchable_text(self, control_id, control_data):
-        text_parts = [control_id]
-        for field in ['title', 'description', 'check', 'fix']:
-            if field in control_data and control_data[field]:
-                text_parts.append(str(control_data[field]))
+    def _create_enhanced_searchable_text(self, control_id, control_data):
+        """Create enhanced searchable text with field importance markers"""
+        text_parts = []
+        
+        # Control ID (high importance)
+        text_parts.append(control_id)
+        
+        # Title (highest importance) - repeat for emphasis
+        title = control_data.get('title', '')
+        if title:
+            text_parts.append(title)
+            text_parts.append(title)  # Double weight
+        
+        # Description (high importance)
+        description = control_data.get('description', '')
+        if description:
+            text_parts.append(description)
+        
+        # Check procedure (medium importance)
+        check = control_data.get('check', '')
+        if check:
+            text_parts.append(check)
+        
+        # Fix procedure (lower importance for search)
+        fix = control_data.get('fix', '')
+        if fix:
+            text_parts.append(fix)
+        
+        # Add severity and version info
+        severity = control_data.get('severity', '')
+        rhel_version = control_data.get('rhel_version', '')
+        if severity:
+            text_parts.append(f"severity {severity}")
+        if rhel_version:
+            text_parts.append(f"rhel {rhel_version}")
+        
         return " ".join(text_parts)
 
+    def _create_searchable_text(self, control_id, control_data):
+        """Legacy method - redirects to enhanced version"""
+        return self._create_enhanced_searchable_text(control_id, control_data)
+
     def search_controls(self, query: str, n_results: int = 5):
-        """Enhanced search with better relevance scoring"""
+        """Enhanced search with improved relevance scoring"""
         if not self.data_loaded:
             return []
 
         query_lower = query.lower()
-        query_words = re.findall(r'\b\w+\b', query_lower)
+        
+        # Enhanced keyword extraction and mapping
+        enhanced_query = self._enhance_query_terms(query_lower)
+        query_words = re.findall(r'\b\w+\b', enhanced_query)
+        
+        # Remove common stop words that don't add search value
+        stop_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 
+                     'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 
+                     'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must',
+                     'how', 'what', 'when', 'where', 'why', 'which', 'who', 'that', 'this', 'these',
+                     'those', 'a', 'an', 'some', 'any', 'all', 'each', 'every', 'many', 'much',
+                     'show', 'tell', 'explain', 'describe', 'help', 'need', 'want', 'get', 'make'}
+        
+        query_words = [word for word in query_words if word not in stop_words and len(word) > 2]
+        
         control_scores = {}
 
-        # Score controls based on word matches
-        for word in query_words:
-            if word in self.search_index:
-                for control_id in self.search_index[word]:
-                    control_scores[control_id] = control_scores.get(control_id, 0) + 2
-
-        # Boost scores for phrase matches and title matches
+        # Score controls with weighted field importance
         for control_id, control_data in self.stig_data.items():
-            searchable_text = self._create_searchable_text(control_id, control_data).lower()
-            title = control_data.get('title', '').lower()
+            score = self._calculate_control_relevance(control_id, control_data, query_lower, query_words)
+            if score > 0:
+                control_scores[control_id] = score
 
-            # Phrase match boost
-            if query_lower in searchable_text:
-                control_scores[control_id] = control_scores.get(control_id, 0) + 5
-
-            # Title match boost (higher relevance)
-            if any(word in title for word in query_words):
-                control_scores[control_id] = control_scores.get(control_id, 0) + 3
-
+        # Sort by relevance score
         sorted_controls = sorted(control_scores.items(), key=lambda x: x[1], reverse=True)
 
+        # Filter out very low relevance scores to improve quality
+        min_score = 1.0  # Only return controls with meaningful matches
+        filtered_controls = [(cid, score) for cid, score in sorted_controls if score >= min_score]
+
         results = []
-        for control_id, score in sorted_controls[:n_results]:
+        for control_id, score in filtered_controls[:n_results]:
             results.append({
                 'control_id': control_id,
                 'control_data': self.stig_data.get(control_id, {}),
-                'score': score
+                'score': round(score, 1)  # Round for cleaner display
             })
         return results
+
+    def _enhance_query_terms(self, query):
+        """Map common terms to STIG-related synonyms and concepts"""
+        # Technical term mappings for better matching
+        term_mappings = {
+            'ssh': 'ssh secure shell openssh',
+            'firewall': 'firewall iptables nftables netfilter',
+            'selinux': 'selinux security enhanced linux mandatory access control',
+            'password': 'password passwd authentication credential',
+            'audit': 'audit auditd logging log',
+            'encryption': 'encryption encrypt crypto cryptographic',
+            'user': 'user account login username',
+            'permission': 'permission permissions privilege access',
+            'network': 'network networking tcp ip',
+            'service': 'service daemon systemd',
+            'file': 'file filesystem directory',
+            'security': 'security secure',
+            'configuration': 'configuration config configure',
+            'policy': 'policy policies rule',
+            'access': 'access control authorization',
+            'system': 'system operating os',
+            'kernel': 'kernel system',
+            'root': 'root administrator admin superuser',
+            'login': 'login logon authentication',
+            'certificate': 'certificate cert x509 ssl tls',
+            'key': 'key private public cryptographic',
+            'compliance': 'compliance compliant requirement',
+            'vulnerability': 'vulnerability vuln cve security',
+            'patch': 'patch update upgrade',
+            'backup': 'backup restore recovery',
+            'monitoring': 'monitoring monitor surveillance',
+            'lockout': 'lockout lock account disable',
+            'timeout': 'timeout session idle',
+            'banner': 'banner notice warning message',
+            'integrity': 'integrity checksum hash verification'
+        }
+        
+        enhanced_query = query
+        for term, synonyms in term_mappings.items():
+            if term in query:
+                enhanced_query += ' ' + synonyms
+        
+        return enhanced_query
+
+    def _calculate_control_relevance(self, control_id, control_data, query_lower, query_words):
+        """Calculate relevance score with weighted field importance"""
+        score = 0.0
+        
+        title = control_data.get('title', '').lower()
+        description = control_data.get('description', '').lower()
+        check = control_data.get('check', '').lower()
+        fix = control_data.get('fix', '').lower()
+        
+        # Field importance weights
+        TITLE_WEIGHT = 10.0      # Highest - title matches are most relevant
+        DESCRIPTION_WEIGHT = 5.0  # High - descriptions are important
+        CHECK_WEIGHT = 3.0       # Medium - check procedures are relevant
+        FIX_WEIGHT = 2.0         # Lower - fix procedures are less searchable
+        
+        # 1. Exact phrase matches (highest relevance)
+        if query_lower in title:
+            score += 50.0 * TITLE_WEIGHT
+        elif query_lower in description:
+            score += 25.0 * DESCRIPTION_WEIGHT
+        elif query_lower in check:
+            score += 15.0 * CHECK_WEIGHT
+        elif query_lower in fix:
+            score += 10.0 * FIX_WEIGHT
+
+        # 2. Multi-word phrase detection (important technical terms)
+        tech_phrases = self._extract_tech_phrases(query_lower)
+        for phrase in tech_phrases:
+            if phrase in title:
+                score += 30.0 * TITLE_WEIGHT
+            elif phrase in description:
+                score += 15.0 * DESCRIPTION_WEIGHT
+            elif phrase in check:
+                score += 10.0 * CHECK_WEIGHT
+            elif phrase in fix:
+                score += 5.0 * FIX_WEIGHT
+
+        # 3. Individual word matches with diminishing returns
+        title_words = set(re.findall(r'\b\w+\b', title))
+        description_words = set(re.findall(r'\b\w+\b', description))
+        check_words = set(re.findall(r'\b\w+\b', check))
+        fix_words = set(re.findall(r'\b\w+\b', fix))
+        
+        matched_words = 0
+        for word in query_words:
+            word_score = 0
+            
+            if word in title_words:
+                word_score += TITLE_WEIGHT
+            if word in description_words:
+                word_score += DESCRIPTION_WEIGHT
+            if word in check_words:
+                word_score += CHECK_WEIGHT
+            if word in fix_words:
+                word_score += FIX_WEIGHT
+            
+            if word_score > 0:
+                matched_words += 1
+                # Diminishing returns: fewer points for each additional word match
+                word_multiplier = max(0.3, 1.0 - (matched_words * 0.1))
+                score += word_score * word_multiplier
+
+        # 4. Boost for high-severity controls (more important)
+        severity = control_data.get('severity', '').lower()
+        if severity == 'high':
+            score *= 1.3
+        elif severity == 'medium':
+            score *= 1.1
+
+        # 5. Penalty for very long controls (often less specific)
+        total_text_length = len(title) + len(description) + len(check) + len(fix)
+        if total_text_length > 5000:  # Very verbose controls
+            score *= 0.8
+
+        return score
+
+    def _extract_tech_phrases(self, query):
+        """Extract common technical phrases that should be matched as units"""
+        tech_phrases = []
+        
+        # Common multi-word technical terms in STIG context
+        phrase_patterns = [
+            r'ssh\s+key[s]?',
+            r'ssh\s+config\w*',
+            r'password\s+policy',
+            r'password\s+complexity',
+            r'account\s+lockout',
+            r'session\s+timeout',
+            r'file\s+permission[s]?',
+            r'access\s+control',
+            r'audit\s+log[s]?',
+            r'system\s+log[s]?',
+            r'security\s+policy',
+            r'login\s+banner',
+            r'root\s+access',
+            r'user\s+account[s]?',
+            r'network\s+service[s]?',
+            r'system\s+service[s]?',
+            r'kernel\s+parameter[s]?',
+            r'boot\s+loader',
+            r'file\s+system',
+            r'mount\s+point[s]?',
+            r'certificate\s+authority',
+            r'public\s+key',
+            r'private\s+key',
+            r'cryptographic\s+\w+',
+            r'mandatory\s+access\s+control',
+            r'discretionary\s+access\s+control',
+        ]
+        
+        for pattern in phrase_patterns:
+            matches = re.findall(pattern, query)
+            tech_phrases.extend(matches)
+        
+        return tech_phrases
 
     def get_enhanced_response(self, query: str, search_results: List[Dict]) -> str:
         """Generate enhanced response using Llama 3.2"""
         if not ollama_client.is_available():
             logger.warning("Ollama not available, using fallback response")
             return self._fallback_response(query, search_results)
+
+        # Use Llama to re-rank results for better relevance
+        if len(search_results) > 1:
+            search_results = self._llama_rerank_results(query, search_results)
 
         # Create context from search results
         context_parts = []
@@ -334,6 +544,54 @@ RHEL Version: {control_data.get('rhel_version', 'Unknown')}
         # Generate response using Llama 3.2
         response = ollama_client.generate_response(query, context)
         return response
+
+    def _llama_rerank_results(self, query: str, search_results: List[Dict]) -> List[Dict]:
+        """Use Llama to re-rank search results for better relevance"""
+        try:
+            # Create a prompt for Llama to evaluate relevance
+            controls_summary = []
+            for i, result in enumerate(search_results):
+                control_id = result['control_id']
+                title = result['control_data'].get('title', 'No title')
+                controls_summary.append(f"{i+1}. {control_id}: {title}")
+            
+            rerank_prompt = f"""Given this user question about RHEL STIG compliance: "{query}"
+
+Here are {len(search_results)} potentially relevant STIG controls:
+{chr(10).join(controls_summary)}
+
+Rank these controls by relevance to the user's question, from most relevant (1) to least relevant ({len(search_results)}). 
+Consider semantic meaning, not just keyword matches.
+
+Respond with only the ranking numbers separated by commas, like: 2,1,4,3,5"""
+
+            # Get Llama's ranking
+            ranking_response = ollama_client.generate_response(rerank_prompt, "")
+            
+            # Parse the ranking
+            try:
+                rankings = [int(x.strip()) for x in ranking_response.split(',')]
+                if len(rankings) == len(search_results) and set(rankings) == set(range(1, len(search_results) + 1)):
+                    # Reorder results based on Llama's ranking
+                    reordered_results = []
+                    for rank in rankings:
+                        if 1 <= rank <= len(search_results):
+                            result = search_results[rank - 1]
+                            # Update score to reflect new ranking
+                            result['score'] = len(search_results) - rankings.index(rank)
+                            reordered_results.append(result)
+                    logger.info(f"Llama re-ranked {len(search_results)} results for better relevance")
+                    return reordered_results
+                else:
+                    logger.warning("Invalid Llama ranking format, keeping original order")
+                    return search_results
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Failed to parse Llama ranking: {e}, keeping original order")
+                return search_results
+                
+        except Exception as e:
+            logger.warning(f"Llama re-ranking failed: {e}, keeping original order")
+            return search_results
 
     def _fallback_response(self, query: str, search_results: List[Dict]) -> str:
         """Fallback response when Llama is not available"""
@@ -368,7 +626,7 @@ RHEL Version: {control_data.get('rhel_version', 'Unknown')}
         return {
             "status": "loaded",
             "total_controls": len(self.stig_data),
-            "search_method": "enhanced_text_search_with_llama3.2",
+            "search_method": "semantic_enhanced_search_with_llama3.2_reranking",
             "llama_available": llama_available,
             "ollama_url": OLLAMA_BASE_URL,
             "llama_model": LLAMA_MODEL,
@@ -674,7 +932,25 @@ def query_form(
             ai_response = stig_loader.get_enhanced_response(question, search_results)
             answer = format_ai_response(question, ai_response, search_results)
         else:
-            answer = "<div style='background: #fff3cd; padding: 15px; border-radius: 8px;'><h4>🔍 No Results</h4><p>No matching STIG controls found. Try different keywords.</p></div>"
+            # No good matches found - provide helpful guidance
+            answer = f"""<div style='background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 5px solid #ffc107;'>
+                <h4>🔍 No Highly Relevant Controls Found</h4>
+                <p>No STIG controls were found with high relevance to your question: <em>"{question}"</em></p>
+                <p><strong>💡 Try these suggestions:</strong></p>
+                <ul>
+                    <li>Use more specific technical terms (e.g., "SSH configuration" instead of "remote access")</li>
+                    <li>Include RHEL-specific terminology</li>
+                    <li>Try different keywords or phrasing</li>
+                    <li>Search for a specific STIG ID if you know it</li>
+                </ul>
+                <p><strong>Example queries that work well:</strong></p>
+                <ul>
+                    <li>"SSH key authentication setup"</li>
+                    <li>"Password policy requirements"</li>
+                    <li>"Audit logging configuration"</li>
+                    <li>"SELinux enforcement settings"</li>
+                </ul>
+            </div>"""
 
     return templates.TemplateResponse("result.html", {
         "request": request, "question": question, "stig_id": stig_id, "answer": answer
@@ -689,7 +965,7 @@ def format_ai_response(question: str, ai_response: str, search_results: List[Dic
         <div style="white-space: pre-wrap; line-height: 1.6;">{ai_response}</div>
     </div>
 
-    <h4>📋 Related STIG Controls:</h4>
+    <h4>📋 Most Relevant STIG Controls:</h4>
     """
 
     for i, result in enumerate(search_results, 1):
@@ -697,11 +973,41 @@ def format_ai_response(question: str, ai_response: str, search_results: List[Dic
         control_data = result['control_data']
         title = control_data.get('title', 'No title')
         score = result.get('score', 0)
+        
+        # Create relevance indicator
+        if score >= 50:
+            relevance_color = "#28a745"  # Green - highly relevant
+            relevance_text = "Highly Relevant"
+        elif score >= 20:
+            relevance_color = "#ffc107"  # Yellow - moderately relevant  
+            relevance_text = "Moderately Relevant"
+        elif score >= 5:
+            relevance_color = "#17a2b8"  # Blue - somewhat relevant
+            relevance_text = "Somewhat Relevant"
+        else:
+            relevance_color = "#6c757d"  # Gray - low relevance
+            relevance_text = "Related"
 
+        # Truncate description more intelligently
+        description = control_data.get('description', 'No description')
+        if len(description) > 250:
+            # Try to break at sentence end
+            truncated = description[:250]
+            last_period = truncated.rfind('.')
+            if last_period > 150:  # Good break point
+                description = description[:last_period + 1] + "..."
+            else:
+                description = truncated + "..."
+        
         answer += f"""
         <div style="background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 3px solid #e53e3e;">
-            <h5>#{i} {control_id}: {title} (Relevance: {score})</h5>
-            <p>{control_data.get('description', 'No description')[:200]}...</p>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h5 style="margin: 0;">#{i} {control_id}: {title}</h5>
+                <span style="background: {relevance_color}; color: white; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                    {relevance_text}
+                </span>
+            </div>
+            <p style="margin: 10px 0; color: #666;">{description}</p>
             <div style="margin-top: 15px; padding: 12px; background: #e3f2fd; border-radius: 5px; text-align: center; border: 2px solid #1976d2;">
                 <a href="/control/{control_id}" style="color: #1976d2; text-decoration: none; font-weight: bold; font-size: 16px;">
                     📋 View Full Details & Implementation Steps →
