@@ -361,13 +361,19 @@ RHEL Version: {control_data.get('rhel_version', 'Unknown')}
         llama_available = ollama_client.is_available()
         logger.info(f"Stats check - Llama available: {llama_available}")
         
+        # Determine how data was loaded
+        auto_load_path = os.getenv("AUTO_LOAD_STIG_PATH")
+        data_source = "auto-loaded" if auto_load_path and os.path.exists(auto_load_path) else "uploaded"
+        
         return {
             "status": "loaded",
             "total_controls": len(self.stig_data),
             "search_method": "enhanced_text_search_with_llama3.2",
             "llama_available": llama_available,
             "ollama_url": OLLAMA_BASE_URL,
-            "llama_model": LLAMA_MODEL
+            "llama_model": LLAMA_MODEL,
+            "data_source": data_source,
+            "auto_load_path": auto_load_path if data_source == "auto-loaded" else None
         }
 
 # Initialize Ollama client
@@ -378,6 +384,24 @@ logger.info(f"Application starting with Ollama URL: {OLLAMA_BASE_URL}")
 logger.info(f"Llama model: {LLAMA_MODEL}")
 
 stig_loader = EnhancedSTIGDataLoader()
+
+# Auto-load STIG data on startup if specified
+AUTO_LOAD_STIG_PATH = os.getenv("AUTO_LOAD_STIG_PATH")
+if AUTO_LOAD_STIG_PATH and os.path.exists(AUTO_LOAD_STIG_PATH):
+    try:
+        logger.info(f"Auto-loading STIG data from: {AUTO_LOAD_STIG_PATH}")
+        stig_data = stig_loader.load_stig_json(AUTO_LOAD_STIG_PATH)
+        stig_loader.index_stig_data(stig_data)
+        stats = stig_loader.get_stats()
+        logger.info(f"✅ Successfully auto-loaded {stats['total_controls']} STIG controls")
+    except Exception as e:
+        logger.error(f"❌ Failed to auto-load STIG data: {e}")
+        logger.error("Application will continue but STIG data upload will be required")
+elif AUTO_LOAD_STIG_PATH:
+    logger.warning(f"Auto-load path specified but file not found: {AUTO_LOAD_STIG_PATH}")
+    logger.warning("Application will continue but STIG data upload will be required")
+else:
+    logger.info("No auto-load path specified. STIG data upload will be required.")
 
 # Create enhanced templates with Llama integration
 with open("templates/index.html", "w") as f:
@@ -398,6 +422,8 @@ with open("templates/index.html", "w") as f:
         .status { padding: 15px; border-radius: 8px; margin: 15px 0; }
         .loaded { background: #d4edda; border-left: 5px solid #28a745; }
         .no-data { background: #fff3cd; border-left: 5px solid #ffc107; }
+        details summary { font-weight: bold; }
+        details[open] summary { margin-bottom: 10px; }
     </style>
 </head>
 <body>
@@ -413,7 +439,7 @@ with open("templates/index.html", "w") as f:
             <div id="status-content">Loading STIG data...</div>
         </div>
 
-        <div class="form-section">
+        <div id="upload-section" class="form-section" style="display: none;">
             <h3>📁 Upload STIG Data</h3>
             <form action="/upload-stig" method="post" enctype="multipart/form-data">
                 <input type="file" name="stig_file" accept=".json" required>
@@ -421,7 +447,23 @@ with open("templates/index.html", "w") as f:
             </form>
         </div>
 
-        <div class="form-section">
+        <div id="loaded-section" class="form-section" style="display: none;">
+            <h3>📁 STIG Data Status</h3>
+            <div id="loaded-info" style="background: #d4edda; padding: 15px; border-radius: 8px; border-left: 5px solid #28a745; margin-bottom: 15px;">
+                <div id="loaded-details">Data loaded successfully</div>
+            </div>
+            <details>
+                <summary style="cursor: pointer; padding: 10px; background: #f8f9fa; border-radius: 4px; margin-bottom: 10px;">
+                    🔄 Replace STIG Data (Advanced)
+                </summary>
+                <form action="/upload-stig" method="post" enctype="multipart/form-data" style="margin-top: 10px;">
+                    <input type="file" name="stig_file" accept=".json" required>
+                    <button type="submit">🔄 Replace Current Data</button>
+                </form>
+            </details>
+        </div>
+
+        <div id="query-section" class="form-section" style="display: none;">
             <h3>🔍 Ask STIG Questions (AI-Powered)</h3>
             <form action="/query" method="post">
                 <textarea name="question" rows="3" placeholder="Ask in natural language: How do I configure SSH security? What are the firewall requirements? How do I enable SELinux?" required></textarea>
@@ -438,11 +480,22 @@ with open("templates/index.html", "w") as f:
                 <li><strong>Implementation Focus:</strong> Gives practical, actionable steps</li>
                 <li><strong>Private & Secure:</strong> Runs locally on your machine</li>
             </ul>
+            
+            <div id="example-questions" style="display: none; margin-top: 20px; padding: 15px; background: #fff; border-radius: 8px; border-left: 4px solid #1976d2;">
+                <h5>💡 Try asking questions like:</h5>
+                <ul>
+                    <li>"How do I configure SSH security settings?"</li>
+                    <li>"What are the firewall requirements for RHEL?"</li>
+                    <li>"Show me SELinux configuration steps"</li>
+                    <li>"What controls are related to password policies?"</li>
+                    <li>"How do I implement audit logging?"</li>
+                </ul>
+            </div>
         </div>
     </div>
 
     <script>
-        // Check Llama status
+        // Check Llama and STIG data status
         fetch('/api/stats')
             .then(r => r.json())
             .then(data => {
@@ -450,7 +503,14 @@ with open("templates/index.html", "w") as f:
                 const llamaContent = document.getElementById('llama-content');
                 const status = document.getElementById('status');
                 const statusContent = document.getElementById('status-content');
+                
+                const uploadSection = document.getElementById('upload-section');
+                const loadedSection = document.getElementById('loaded-section');
+                const querySection = document.getElementById('query-section');
+                const loadedDetails = document.getElementById('loaded-details');
+                const exampleQuestions = document.getElementById('example-questions');
 
+                // Handle Llama status
                 if (data.llama_available) {
                     llamaStatus.className = 'llama-status llama-online';
                     llamaContent.innerHTML = '🦙 Llama 3.2 is online and ready for intelligent responses!';
@@ -459,15 +519,59 @@ with open("templates/index.html", "w") as f:
                     llamaContent.innerHTML = '⚠️ Llama 3.2 is offline. Install: <code>ollama pull llama3.2:3b</code>';
                 }
 
+                // Handle STIG data status
                 if (data.status === 'loaded') {
-                    status.className = 'status loaded';
-                    statusContent.innerHTML = `✅ ${data.total_controls} STIG controls loaded`;
+                    const controlCount = data.total_controls || 0;
+                    const dataSource = data.data_source || 'unknown';
+                    const autoLoadPath = data.auto_load_path;
+                    
+                    // Hide status section and upload section
+                    status.style.display = 'none';
+                    uploadSection.style.display = 'none';
+                    
+                    // Show loaded section and query section
+                    loadedSection.style.display = 'block';
+                    querySection.style.display = 'block';
+                    exampleQuestions.style.display = 'block';
+                    
+                    // Update loaded details based on data source
+                    let sourceInfo = '';
+                    if (dataSource === 'auto-loaded') {
+                        sourceInfo = `<p><strong>📁 Source:</strong> Auto-loaded on container startup</p>`;
+                        if (autoLoadPath) {
+                            sourceInfo += `<p><strong>📂 File:</strong> ${autoLoadPath}</p>`;
+                        }
+                    } else if (dataSource === 'uploaded') {
+                        sourceInfo = `<p><strong>📁 Source:</strong> Uploaded via web interface</p>`;
+                    }
+                    
+                    loadedDetails.innerHTML = `
+                        <h4>✅ STIG Data Ready</h4>
+                        <p><strong>${controlCount}</strong> STIG controls loaded and indexed</p>
+                        ${sourceInfo}
+                        <p><strong>🔍 Search:</strong> ${data.search_method || 'Text search with AI enhancement'}</p>
+                        <p><em>🤖 Ready for AI-powered STIG questions! Use the form below.</em></p>
+                    `;
                 } else {
+                    // Show status section and upload section
                     status.className = 'status no-data';
-                    statusContent.innerHTML = '⚠️ No STIG data loaded. Upload JSON file above.';
+                    statusContent.innerHTML = '⚠️ No STIG data loaded. Upload JSON file below to get started.';
+                    status.style.display = 'block';
+                    uploadSection.style.display = 'block';
+                    
+                    // Hide loaded section and query section
+                    loadedSection.style.display = 'none';
+                    querySection.style.display = 'none';
+                    exampleQuestions.style.display = 'none';
                 }
             })
-            .catch(console.error);
+            .catch(error => {
+                console.error('Error fetching status:', error);
+                // Show upload form as fallback
+                document.getElementById('upload-section').style.display = 'block';
+                document.getElementById('status').innerHTML = '<div class="status no-data"><div>⚠️ Unable to check system status. Upload STIG data below.</div></div>';
+                document.getElementById('example-questions').style.display = 'none';
+            });
     </script>
 </body>
 </html>''')
@@ -513,6 +617,9 @@ def home(request: Request):
 @app.post("/upload-stig")
 async def upload_stig_file(stig_file: UploadFile = File(...)):
     try:
+        # Check if data was previously auto-loaded
+        was_auto_loaded = stig_loader.data_loaded and os.getenv("AUTO_LOAD_STIG_PATH")
+        
         file_path = f"stig_data/{stig_file.filename}"
         with open(file_path, "wb") as f:
             content = await stig_file.read()
@@ -522,12 +629,22 @@ async def upload_stig_file(stig_file: UploadFile = File(...)):
         stig_loader.index_stig_data(stig_data)
         stats = stig_loader.get_stats()
 
+        action = "replaced" if was_auto_loaded else "loaded"
+        message = f"Successfully {action} STIG data: {stats['total_controls']} controls from {stig_file.filename}"
+        
+        if was_auto_loaded:
+            logger.info(f"User replaced auto-loaded STIG data with uploaded file: {stig_file.filename}")
+        else:
+            logger.info(f"User uploaded STIG data: {stig_file.filename}")
+
         return JSONResponse({
-            "message": f"Successfully loaded {stats['total_controls']} STIG controls",
+            "message": message,
             "stats": stats,
-            "status": "success"
+            "status": "success",
+            "action": action
         })
     except Exception as e:
+        logger.error(f"Failed to upload STIG data: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/query", response_class=HTMLResponse)
