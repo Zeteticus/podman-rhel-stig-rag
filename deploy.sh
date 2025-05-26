@@ -18,7 +18,71 @@ CONTAINER_NAME="stig-rag-textsearch"
 IMAGE_NAME="localhost/rhel-stig-rag:textsearch"
 HOST_PORT="8000"
 
+# Parse command line arguments
+STIG_FILE_PATH=""
+SHOW_HELP=false
+
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  -f, --stig-file PATH    Auto-load STIG JSON file from PATH"
+    echo "  -h, --help             Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0                                    # Deploy without auto-loading"
+    echo "  $0 -f /path/to/rhel8-stig.json      # Auto-load STIG file on startup"
+    echo "  $0 --stig-file ./stig-data.json     # Auto-load local STIG file"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -f|--stig-file)
+            STIG_FILE_PATH="$2"
+            shift 2
+            ;;
+        -h|--help)
+            SHOW_HELP=true
+            shift
+            ;;
+        *)
+            echo_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$SHOW_HELP" = true ]; then
+    usage
+    exit 0
+fi
+
 echo_status "🚀 Deploying RHEL STIG RAG with Llama 3.2 Integration..."
+
+# Validate STIG file if provided
+VOLUME_ARGS=""
+ENV_STIG_ARGS=""
+if [ -n "$STIG_FILE_PATH" ]; then
+    if [ ! -f "$STIG_FILE_PATH" ]; then
+        echo_error "STIG file not found: $STIG_FILE_PATH"
+        exit 1
+    fi
+    
+    # Convert to absolute path
+    STIG_FILE_PATH=$(realpath "$STIG_FILE_PATH")
+    echo_status "📁 Auto-load STIG file: $STIG_FILE_PATH"
+    
+    # Validate it's a JSON file
+    if ! python3 -c "import json; json.load(open('$STIG_FILE_PATH'))" 2>/dev/null; then
+        echo_error "Invalid JSON file: $STIG_FILE_PATH"
+        exit 1
+    fi
+    
+    echo_status "✅ STIG JSON file validated"
+    VOLUME_ARGS="-v $STIG_FILE_PATH:/app/auto-load-stig.json:ro,Z"
+    ENV_STIG_ARGS="-e AUTO_LOAD_STIG_PATH=/app/auto-load-stig.json"
+fi
 
 # Check if Ollama is running
 echo_status "Checking Ollama availability..."
@@ -85,6 +149,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
 ENV OLLAMA_BASE_URL=http://host.containers.internal:11434
 ENV LLAMA_MODEL=llama3.2:3b
+ENV AUTO_LOAD_STIG_PATH=""
 
 EXPOSE 8000
 
@@ -128,8 +193,10 @@ podman run -d \
     --name "$CONTAINER_NAME" \
     $NETWORK_ARGS \
     $ENV_ARGS \
+    $ENV_STIG_ARGS \
     -e LLAMA_MODEL=llama3.2:3b \
     -v stig-data-vol:/app/stig_data:Z \
+    $VOLUME_ARGS \
     --restart unless-stopped \
     "$IMAGE_NAME"
 
@@ -153,11 +220,18 @@ for i in {1..30}; do
         echo "   ✓ API endpoints for programmatic access"
         echo "   ✓ Persistent data storage"
         echo ""
-        echo_status "📁 To load your STIG data:"
-        echo "   1. Open http://localhost:$HOST_PORT in your browser"
-        echo "   2. Upload your STIG JSON file"
-        echo "   3. Start asking STIG compliance questions!"
-        echo "   4. Get AI-powered implementation guidance!"
+        echo_status "📁 To use your STIG data:"
+        if [ -n "$STIG_FILE_PATH" ]; then
+            echo "   ✅ STIG data auto-loaded from: $(basename "$STIG_FILE_PATH")"
+            echo "   1. Open http://localhost:$HOST_PORT in your browser"
+            echo "   2. Start asking STIG compliance questions immediately!"
+            echo "   3. Get AI-powered implementation guidance!"
+        else
+            echo "   1. Open http://localhost:$HOST_PORT in your browser"
+            echo "   2. Upload your STIG JSON file"
+            echo "   3. Start asking STIG compliance questions!"
+            echo "   4. Get AI-powered implementation guidance!"
+        fi
 
         # Test the health endpoint and show Llama status
         echo ""
@@ -170,6 +244,27 @@ for i in {1..30}; do
             echo_status "🦙 Llama 3.2 AI integration: ONLINE"
         else
             echo_warn "🦙 Llama 3.2 AI integration: OFFLINE (text search still works)"
+        fi
+
+        # Check STIG data status
+        echo ""
+        echo_info "Checking STIG data status:"
+        STATS_RESPONSE=$(curl -s "http://localhost:$HOST_PORT/api/stats")
+        echo "$STATS_RESPONSE" | python3 -m json.tool
+        
+        if echo "$STATS_RESPONSE" | grep -q '"status": "loaded"'; then
+            CONTROL_COUNT=$(echo "$STATS_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('total_controls', 0))")
+            if [ -n "$STIG_FILE_PATH" ]; then
+                echo_status "📁 Auto-loaded STIG data: $CONTROL_COUNT controls"
+            else
+                echo_status "📁 STIG data loaded: $CONTROL_COUNT controls"
+            fi
+        else
+            if [ -n "$STIG_FILE_PATH" ]; then
+                echo_warn "⚠️  STIG auto-load may have failed - check container logs"
+            else
+                echo_info "📁 No STIG data loaded - upload required via web interface"
+            fi
         fi
 
         break
@@ -204,7 +299,13 @@ podman logs --tail 10 "$CONTAINER_NAME"
 # Show next steps
 echo ""
 echo_status "🔧 Next Steps:"
-echo "   1. Upload your STIG JSON file via the web interface"
+if [ -n "$STIG_FILE_PATH" ]; then
+    echo "   ✅ STIG data ready - start asking questions immediately!"
+    echo "   🌐 Open: http://localhost:$HOST_PORT"
+else
+    echo "   1. Upload your STIG JSON file via the web interface"
+    echo "   🌐 Open: http://localhost:$HOST_PORT"
+fi
 echo "   2. Ask natural language questions like:"
 echo "      • 'How do I configure SSH security?'"
 echo "      • 'What are the firewall requirements?'"
@@ -216,3 +317,11 @@ echo "   • Model: llama3.2:3b"
 echo "   • Provides intelligent, contextual responses"
 echo "   • Explains STIG controls in practical terms"
 echo "   • Offers step-by-step implementation guidance"
+echo ""
+if [ -n "$STIG_FILE_PATH" ]; then
+    echo_status "📁 Auto-loaded STIG file: $(basename "$STIG_FILE_PATH")"
+    echo_status "🎉 Ready to use immediately - no upload required!"
+else
+    echo_info "💡 Tip: Use -f flag to auto-load STIG file on future deployments"
+    echo "   Example: $0 -f /path/to/your-stig.json"
+fi
