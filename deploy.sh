@@ -1,327 +1,360 @@
 #!/bin/bash
-# deploy-text-search.sh - Deploy STIG RAG with Llama 3.2 Integration
+
+# Optimized STIG RAG Deployment Script with Data Loading
+# This script builds and deploys the RHEL STIG RAG container with:
+# - Automatic STIG JSON data loading
+# - Redis caching for performance
+# - Semantic search capabilities
 
 set -e
 
+# Color codes for output
+RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-RED='\033[0;31m'
 BLUE='\033[0;34m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-echo_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
-echo_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-echo_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-echo_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+# Configuration
+APP_NAME="stig-rag"
+REDIS_NAME="stig-rag-redis"
+POD_NAME="stig-rag-pod"
+IMAGE_NAME="rhel-stig-rag:optimized"
+PORT="${PORT:-8000}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+DATA_DIR="${HOME}/stig-rag-data"
+CACHE_DIR="${HOME}/stig-rag-cache"
+LOG_DIR="${HOME}/stig-rag-logs"
 
-CONTAINER_NAME="stig-rag-textsearch"
-IMAGE_NAME="localhost/rhel-stig-rag:textsearch"
-HOST_PORT="8000"
-
-# Parse command line arguments
-STIG_FILE_PATH=""
-SHOW_HELP=false
-
-usage() {
-    echo "Usage: $0 [OPTIONS]"
-    echo ""
-    echo "Options:"
-    echo "  -f, --stig-file PATH    Auto-load STIG JSON file from PATH"
-    echo "  -h, --help             Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0                                    # Deploy without auto-loading"
-    echo "  $0 -f /path/to/rhel8-stig.json      # Auto-load STIG file on startup"
-    echo "  $0 --stig-file ./stig-data.json     # Auto-load local STIG file"
+# Functions
+print_status() {
+    echo -e "${BLUE}[*]${NC} $1"
 }
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -f|--stig-file)
-            STIG_FILE_PATH="$2"
-            shift 2
-            ;;
-        -h|--help)
-            SHOW_HELP=true
-            shift
-            ;;
-        *)
-            echo_error "Unknown option: $1"
-            usage
+print_success() {
+    echo -e "${GREEN}[✓]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[✗]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
+
+# Check prerequisites
+check_prerequisites() {
+    print_status "Checking prerequisites..."
+    
+    # Check for podman
+    if ! command -v podman &> /dev/null; then
+        print_error "Podman is not installed. Please install podman first."
+        echo "Run: sudo dnf install -y podman"
+        exit 1
+    fi
+    
+    # Check for required files
+    local required_files=("Dockerfile" "app.py" "load_stig_data.py" "requirements.txt" "startup.sh")
+    for file in "${required_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            print_error "Required file '$file' not found!"
             exit 1
-            ;;
-    esac
-done
-
-if [ "$SHOW_HELP" = true ]; then
-    usage
-    exit 0
-fi
-
-echo_status "🚀 Deploying RHEL STIG RAG with Llama 3.2 Integration..."
-
-# Validate STIG file if provided
-VOLUME_ARGS=""
-ENV_STIG_ARGS=""
-if [ -n "$STIG_FILE_PATH" ]; then
-    if [ ! -f "$STIG_FILE_PATH" ]; then
-        echo_error "STIG file not found: $STIG_FILE_PATH"
-        exit 1
+        fi
+    done
+    
+    # Check for STIG data file
+    if [ ! -f "stig_data.json" ]; then
+        print_warning "stig_data.json not found. Please ensure you have your STIG data file."
+        echo "The container will fail to start without this file."
+        read -p "Continue anyway? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
     
-    # Convert to absolute path
-    STIG_FILE_PATH=$(realpath "$STIG_FILE_PATH")
-    echo_status "📁 Auto-load STIG file: $STIG_FILE_PATH"
-    
-    # Validate it's a JSON file
-    if ! python3 -c "import json; json.load(open('$STIG_FILE_PATH'))" 2>/dev/null; then
-        echo_error "Invalid JSON file: $STIG_FILE_PATH"
-        exit 1
-    fi
-    
-    echo_status "✅ STIG JSON file validated"
-    VOLUME_ARGS="-v $STIG_FILE_PATH:/app/auto-load-stig.json:ro,Z"
-    ENV_STIG_ARGS="-e AUTO_LOAD_STIG_PATH=/app/auto-load-stig.json"
-fi
-
-# Check if Ollama is running
-echo_status "Checking Ollama availability..."
-if curl -s -f "http://localhost:11434/api/tags" >/dev/null 2>&1; then
-    echo_status "✅ Ollama is running and accessible"
-    
-    # Check if llama3.2:3b model is available
-    if curl -s "http://localhost:11434/api/tags" | grep -q "llama3.2:3b\|llama3.2:latest"; then
-        echo_status "✅ Llama 3.2 model found"
-    else
-        echo_warn "⚠️  Llama 3.2 model not found. Consider running: ollama pull llama3.2:3b"
-    fi
-else
-    echo_warn "⚠️  Ollama not accessible at localhost:11434"
-    echo_warn "    Install Ollama and run: ollama serve"
-    echo_warn "    Then: ollama pull llama3.2:3b"
-    echo_warn "    The application will still work but without AI features"
-fi
-
-# 1. Create requirements with necessary dependencies
-cat > requirements-textsearch.txt << 'EOFR'
-fastapi==0.104.0
-uvicorn==0.24.0
-pydantic==2.4.2
-jinja2==3.1.2
-python-multipart==0.0.6
-requests==2.31.0
-EOFR
-
-# 2. Copy the text search app
-echo_status "Setting up Llama-integrated application..."
-# Using existing rhel_stig_rag.py with Llama integration
-
-# 3. Create enhanced Containerfile
-cat > Containerfile.textsearch << 'EOFC'
-FROM registry.access.redhat.com/ubi9/ubi:latest
-
-WORKDIR /app
-
-# Install minimal dependencies
-RUN dnf update -y && \
-    dnf install -y python3 python3-pip && \
-    dnf clean all
-
-# Create user
-RUN useradd -r -u 1001 -g 0 -m -d /app -s /bin/bash stigrag && \
-    chown -R stigrag:0 /app && \
-    chmod -R g=u /app
-
-# Copy requirements and install
-COPY --chown=stigrag:0 requirements-textsearch.txt /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir --ignore-installed -r requirements.txt
-
-# Copy application
-COPY --chown=stigrag:0 rhel_stig_rag.py /app/
+    print_success "Prerequisites check passed"
+}
 
 # Create directories
-RUN mkdir -p /app/stig_data /app/templates && \
-    chown -R stigrag:0 /app
-
-USER stigrag
-
-ENV PYTHONUNBUFFERED=1 
-ENV PORT=8000
-ENV OLLAMA_BASE_URL=http://host.containers.internal:11434
-ENV LLAMA_MODEL=llama3.2:3b
-ENV AUTO_LOAD_STIG_PATH=""
-
-EXPOSE 8000
-
-CMD ["python3", "/app/rhel_stig_rag.py"]
-EOFC
-
-# 4. Stop existing containers
-echo_status "Stopping existing containers..."
-podman stop "$CONTAINER_NAME" 2>/dev/null || true
-podman rm "$CONTAINER_NAME" 2>/dev/null || true
-podman stop "stig-rag-enhanced" 2>/dev/null || true
-podman rm "stig-rag-enhanced" 2>/dev/null || true
-podman stop "stig-rag" 2>/dev/null || true
-podman rm "stig-rag" 2>/dev/null || true
-
-# 5. Build the container
-echo_status "Building Llama-integrated container..."
-podman build -t "$IMAGE_NAME" -f Containerfile.textsearch --no-cache .
-
-# 6. Create persistent volumes
-echo_status "Creating persistent storage..."
-podman volume create stig-data-vol 2>/dev/null || echo_warn "Volume already exists"
-
-# 7. Determine networking approach
-echo_status "Configuring container networking for Ollama access..."
-
-# Check if host.containers.internal works
-if podman run --rm alpine nslookup host.containers.internal >/dev/null 2>&1; then
-    echo_status "Using host.containers.internal for Ollama connectivity"
-    NETWORK_ARGS="-p $HOST_PORT:8000"
-    ENV_ARGS="-e OLLAMA_BASE_URL=http://host.containers.internal:11434"
-else
-    echo_status "Using host networking for Ollama connectivity"
-    NETWORK_ARGS="--network host"
-    ENV_ARGS="-e OLLAMA_BASE_URL=http://localhost:11434"
-fi
-
-# 8. Start the container
-echo_status "Starting Llama-integrated STIG RAG container..."
-podman run -d \
-    --name "$CONTAINER_NAME" \
-    $NETWORK_ARGS \
-    $ENV_ARGS \
-    $ENV_STIG_ARGS \
-    -e LLAMA_MODEL=llama3.2:3b \
-    -v stig-data-vol:/app/stig_data:Z \
-    $VOLUME_ARGS \
-    --restart unless-stopped \
-    "$IMAGE_NAME"
-
-# 9. Wait for startup and test
-echo_status "Waiting for service to start..."
-for i in {1..30}; do
-    if curl -s -f "http://localhost:$HOST_PORT/health" >/dev/null 2>&1; then
-        echo_status "✅ RHEL STIG RAG with Llama 3.2 is ready!"
-        echo ""
-        echo_info "🌐 Web Interface: http://localhost:$HOST_PORT"
-        echo_info "📚 API Documentation: http://localhost:$HOST_PORT/docs"
-        echo_info "📊 Data Statistics: http://localhost:$HOST_PORT/api/stats"
-        echo_info "🔍 Health Check: http://localhost:$HOST_PORT/health"
-        echo ""
-        echo_status "🚀 Features Available:"
-        echo "   ✓ Web-based STIG JSON file upload"
-        echo "   ✓ AI-powered STIG question answering (Llama 3.2)"
-        echo "   ✓ Fast text search for STIG controls"
-        echo "   ✓ Real STIG data integration"
-        echo "   ✓ Intelligent contextual responses"
-        echo "   ✓ API endpoints for programmatic access"
-        echo "   ✓ Persistent data storage"
-        echo ""
-        echo_status "📁 To use your STIG data:"
-        if [ -n "$STIG_FILE_PATH" ]; then
-            echo "   ✅ STIG data auto-loaded from: $(basename "$STIG_FILE_PATH")"
-            echo "   1. Open http://localhost:$HOST_PORT in your browser"
-            echo "   2. Start asking STIG compliance questions immediately!"
-            echo "   3. Get AI-powered implementation guidance!"
-        else
-            echo "   1. Open http://localhost:$HOST_PORT in your browser"
-            echo "   2. Upload your STIG JSON file"
-            echo "   3. Start asking STIG compliance questions!"
-            echo "   4. Get AI-powered implementation guidance!"
-        fi
-
-        # Test the health endpoint and show Llama status
-        echo ""
-        echo_info "Testing system health:"
-        HEALTH_RESPONSE=$(curl -s "http://localhost:$HOST_PORT/health")
-        echo "$HEALTH_RESPONSE" | python3 -m json.tool
-        
-        # Check if Llama is working
-        if echo "$HEALTH_RESPONSE" | grep -q '"llama_available": true'; then
-            echo_status "🦙 Llama 3.2 AI integration: ONLINE"
-        else
-            echo_warn "🦙 Llama 3.2 AI integration: OFFLINE (text search still works)"
-        fi
-
-        # Check STIG data status
-        echo ""
-        echo_info "Checking STIG data status:"
-        STATS_RESPONSE=$(curl -s "http://localhost:$HOST_PORT/api/stats")
-        echo "$STATS_RESPONSE" | python3 -m json.tool
-        
-        if echo "$STATS_RESPONSE" | grep -q '"status": "loaded"'; then
-            CONTROL_COUNT=$(echo "$STATS_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('total_controls', 0))")
-            if [ -n "$STIG_FILE_PATH" ]; then
-                echo_status "📁 Auto-loaded STIG data: $CONTROL_COUNT controls"
-            else
-                echo_status "📁 STIG data loaded: $CONTROL_COUNT controls"
-            fi
-        else
-            if [ -n "$STIG_FILE_PATH" ]; then
-                echo_warn "⚠️  STIG auto-load may have failed - check container logs"
-            else
-                echo_info "📁 No STIG data loaded - upload required via web interface"
-            fi
-        fi
-
-        break
+create_directories() {
+    print_status "Creating directories..."
+    mkdir -p "$DATA_DIR" "$CACHE_DIR" "$LOG_DIR"
+    
+    # Set proper permissions
+    chmod 755 "$DATA_DIR" "$CACHE_DIR" "$LOG_DIR"
+    
+    # Handle SELinux contexts if enabled
+    if command -v getenforce &> /dev/null && [ "$(getenforce)" != "Disabled" ]; then
+        print_status "Setting SELinux contexts..."
+        chcon -R -t container_file_t "$DATA_DIR" "$CACHE_DIR" "$LOG_DIR" 2>/dev/null || true
     fi
-    echo -n "."
-    sleep 2
-done
+    
+    print_success "Directories created"
+}
 
-if [ $i -eq 30 ]; then
-    echo_error "Service failed to start. Checking logs..."
-    podman logs --tail 30 "$CONTAINER_NAME"
-    echo ""
-    echo_error "Container status:"
-    podman ps -a --filter name="$CONTAINER_NAME"
-    echo ""
-    echo_error "Troubleshooting tips:"
-    echo "   • Ensure Ollama is running: ollama serve"
-    echo "   • Check if model exists: ollama list"
-    echo "   • Pull model if needed: ollama pull llama3.2:3b"
-    echo "   • Check container networking: podman network ls"
-else
-    echo ""
-    echo_status "🎉 Llama-integrated STIG RAG deployment complete!"
-    echo_status "System is ready for intelligent STIG data analysis!"
-fi
+# Stop existing containers
+stop_existing() {
+    print_status "Stopping existing containers..."
+    
+    # Stop and remove existing containers
+    podman stop "$APP_NAME" "$REDIS_NAME" 2>/dev/null || true
+    podman rm "$APP_NAME" "$REDIS_NAME" 2>/dev/null || true
+    
+    # Remove existing pod
+    podman pod rm "$POD_NAME" 2>/dev/null || true
+    
+    print_success "Existing containers stopped"
+}
 
-# Show container logs for verification
-echo ""
-echo_info "Recent container logs:"
-podman logs --tail 10 "$CONTAINER_NAME"
+# Build container image
+build_image() {
+    print_status "Building container image..."
+    
+    # Make scripts executable
+    chmod +x startup.sh load_stig_data.py
+    
+    # Build the image
+    if podman build -t "$IMAGE_NAME" .; then
+        print_success "Container image built successfully"
+    else
+        print_error "Failed to build container image"
+        exit 1
+    fi
+}
 
-# Show next steps
-echo ""
-echo_status "🔧 Next Steps:"
-if [ -n "$STIG_FILE_PATH" ]; then
-    echo "   ✅ STIG data ready - start asking questions immediately!"
-    echo "   🌐 Open: http://localhost:$HOST_PORT"
-else
-    echo "   1. Upload your STIG JSON file via the web interface"
-    echo "   🌐 Open: http://localhost:$HOST_PORT"
-fi
-echo "   2. Ask natural language questions like:"
-echo "      • 'How do I configure SSH security?'"
-echo "      • 'What are the firewall requirements?'"
-echo "      • 'Show me SELinux configuration steps'"
-echo "   3. Get AI-powered implementation guidance!"
-echo ""
-echo_status "🦙 Ollama Integration:"
-echo "   • Model: llama3.2:3b"
-echo "   • Provides intelligent, contextual responses"
-echo "   • Explains STIG controls in practical terms"
-echo "   • Offers step-by-step implementation guidance"
-echo ""
-if [ -n "$STIG_FILE_PATH" ]; then
-    echo_status "📁 Auto-loaded STIG file: $(basename "$STIG_FILE_PATH")"
-    echo_status "🎉 Ready to use immediately - no upload required!"
-else
-    echo_info "💡 Tip: Use -f flag to auto-load STIG file on future deployments"
-    echo "   Example: $0 -f /path/to/your-stig.json"
-fi
+# Create pod for networking
+create_pod() {
+    print_status "Creating pod for container networking..."
+    
+    podman pod create \
+        --name "$POD_NAME" \
+        -p "${PORT}:8000" \
+        -p "${REDIS_PORT}:6379" \
+        --userns=keep-id \
+        --network bridge
+    
+    print_success "Pod created"
+}
+
+# Run Redis container
+run_redis() {
+    print_status "Starting Redis cache container..."
+    
+    podman run -d \
+        --pod "$POD_NAME" \
+        --name "$REDIS_NAME" \
+        --volume redis_data:/data:Z \
+        --restart unless-stopped \
+        docker.io/redis:7-alpine \
+        redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    
+    # Wait for Redis to be ready
+    print_status "Waiting for Redis to be ready..."
+    local max_attempts=30
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if podman exec "$REDIS_NAME" redis-cli ping &>/dev/null; then
+            print_success "Redis is ready"
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    
+    if [ $attempt -eq $max_attempts ]; then
+        print_warning "Redis may not be fully ready, but continuing..."
+    fi
+}
+
+# Run main application container
+run_app() {
+    print_status "Starting STIG RAG application container..."
+    
+    # Copy STIG data to data directory
+    if [ -f "stig_data.json" ]; then
+        cp -f "stig_data.json" "$DATA_DIR/"
+        print_success "STIG data file copied to $DATA_DIR"
+    fi
+    
+    podman run -d \
+        --pod "$POD_NAME" \
+        --name "$APP_NAME" \
+        --volume "$DATA_DIR:/app/data:ro,Z" \
+        --volume "$CACHE_DIR:/app/cache:Z" \
+        --volume "$LOG_DIR:/app/logs:Z" \
+        --env REDIS_HOST=localhost \
+        --env LOG_LEVEL="${LOG_LEVEL:-INFO}" \
+        --env APP_PORT=8000 \
+        --restart unless-stopped \
+        --memory="${MEMORY_LIMIT:-2g}" \
+        --cpus="${CPU_LIMIT:-2}" \
+        "$IMAGE_NAME"
+    
+    print_success "Application container started"
+}
+
+# Setup systemd service
+setup_systemd() {
+    print_status "Setting up systemd service..."
+    
+    # Create systemd user directory if it doesn't exist
+    mkdir -p ~/.config/systemd/user/
+    
+    # Create service file
+    cat > ~/.config/systemd/user/stig-rag.service << EOF
+[Unit]
+Description=RHEL STIG RAG Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/podman pod start $POD_NAME
+ExecStop=/usr/bin/podman pod stop $POD_NAME
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+EOF
+
+    # Reload systemd
+    systemctl --user daemon-reload
+    
+    # Enable service
+    systemctl --user enable stig-rag.service
+    
+    print_success "Systemd service configured"
+}
+
+# Health check
+health_check() {
+    print_status "Performing health check..."
+    
+    # Wait for application to start
+    sleep 5
+    
+    local max_attempts=30
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s "http://localhost:${PORT}/health" > /dev/null; then
+            print_success "Application is healthy"
+            
+            # Get health status
+            local health_status=$(curl -s "http://localhost:${PORT}/health")
+            echo -e "${GREEN}Health Status:${NC} $health_status"
+            break
+        fi
+        sleep 2
+        ((attempt++))
+        echo -n "."
+    done
+    
+    if [ $attempt -eq $max_attempts ]; then
+        print_error "Health check failed - application may not be running correctly"
+        echo "Check logs with: podman logs $APP_NAME"
+        exit 1
+    fi
+}
+
+# Display access information
+display_info() {
+    echo
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}       RHEL STIG RAG Deployment Complete! 🚀${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo
+    echo -e "${BLUE}Access Points:${NC}"
+    echo -e "  • Web Interface:    ${GREEN}http://localhost:${PORT}${NC}"
+    echo -e "  • API Documentation: ${GREEN}http://localhost:${PORT}/docs${NC}"
+    echo -e "  • Health Check:     ${GREEN}http://localhost:${PORT}/health${NC}"
+    echo -e "  • API Metrics:      ${GREEN}http://localhost:${PORT}/api/metrics${NC}"
+    echo
+    echo -e "${BLUE}Container Management:${NC}"
+    echo -e "  • View logs:        ${YELLOW}podman logs $APP_NAME${NC}"
+    echo -e "  • View Redis logs:  ${YELLOW}podman logs $REDIS_NAME${NC}"
+    echo -e "  • Stop containers:  ${YELLOW}podman pod stop $POD_NAME${NC}"
+    echo -e "  • Start containers: ${YELLOW}podman pod start $POD_NAME${NC}"
+    echo -e "  • Remove all:       ${YELLOW}podman pod rm -f $POD_NAME${NC}"
+    echo
+    echo -e "${BLUE}Data Locations:${NC}"
+    echo -e "  • STIG Data:  ${DATA_DIR}"
+    echo -e "  • Cache:      ${CACHE_DIR}"
+    echo -e "  • Logs:       ${LOG_DIR}"
+    echo
+    echo -e "${BLUE}Quick Test:${NC}"
+    echo -e "  ${YELLOW}curl -X POST http://localhost:${PORT}/api/query \\${NC}"
+    echo -e "  ${YELLOW}  -H \"Content-Type: application/json\" \\${NC}"
+    echo -e "  ${YELLOW}  -d '{\"question\": \"How to configure SELinux?\"}'${NC}"
+    echo
+}
+
+# Main deployment function
+main() {
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}       RHEL STIG RAG Optimized Deployment Script${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo
+    
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --port)
+                PORT="$2"
+                shift 2
+                ;;
+            --no-redis)
+                NO_REDIS=true
+                shift
+                ;;
+            --no-systemd)
+                NO_SYSTEMD=true
+                shift
+                ;;
+            --help)
+                echo "Usage: $0 [OPTIONS]"
+                echo "Options:"
+                echo "  --port PORT       Set the application port (default: 8000)"
+                echo "  --no-redis        Skip Redis deployment"
+                echo "  --no-systemd      Skip systemd service setup"
+                echo "  --help            Show this help message"
+                exit 0
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Run deployment steps
+    check_prerequisites
+    create_directories
+    stop_existing
+    build_image
+    create_pod
+    
+    if [ "$NO_REDIS" != "true" ]; then
+        run_redis
+    else
+        print_warning "Skipping Redis deployment (caching will be disabled)"
+    fi
+    
+    run_app
+    
+    if [ "$NO_SYSTEMD" != "true" ]; then
+        setup_systemd
+    fi
+    
+    health_check
+    display_info
+    
+    print_success "Deployment completed successfully!"
+}
+
+# Run main function
+main "$@"
