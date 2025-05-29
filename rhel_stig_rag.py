@@ -65,40 +65,41 @@ class OllamaClient:
             return False
 
     def generate_response(self, prompt: str, context: str = "") -> str:
-        """Generate response using Llama 3.2"""
+        """Generate response using Llama with aggressive timeout handling"""
         try:
-            full_prompt = f"""You are a RHEL STIG compliance expert. Answer the user's question using the provided STIG control information.
+            # Aggressively truncate context if too long to prevent timeouts
+            max_context_length = 1500  # Much smaller context
+            if len(context) > max_context_length:
+                context = context[:max_context_length] + "\n[...truncated...]"
+            
+            # Much shorter and simpler prompt
+            full_prompt = f"""STIG Expert: Answer concisely using the provided controls.
 
-STIG Controls Context:
+Controls:
 {context}
 
-User Question: {prompt}
+Question: {prompt}
 
-Instructions:
-- Focus on practical implementation steps
-- Reference specific STIG control IDs when relevant
-- Provide clear, actionable guidance
-- If the context doesn't contain relevant information, say so clearly
-- Be concise but thorough
-
-Answer:"""
+Brief Answer:"""
 
             payload = {
                 "model": self.model,
                 "prompt": full_prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.1,  # Low temperature for consistent technical responses
+                    "temperature": 0.1,
                     "top_p": 0.9,
-                    "num_predict": 500   # Limit response length
+                    "num_predict": 150,   # Much shorter responses
+                    "num_ctx": 1024,     # Smaller context window
+                    "num_thread": 4      # Limit CPU usage
                 }
             }
 
-            logger.info(f"Sending request to Ollama at: {self.base_url}/api/generate")
+            logger.info(f"Sending short request to Ollama")
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
-                timeout=30
+                timeout=30  # Back to 30s but with much smaller context
             )
 
             if response.status_code == 200:
@@ -110,11 +111,11 @@ Answer:"""
                 return error_msg
 
         except requests.exceptions.ConnectionError as e:
-            error_msg = "Error: Cannot connect to Ollama. Check if Ollama is running and accessible."
+            error_msg = "Error: Cannot connect to Ollama."
             logger.error(f"{error_msg} Details: {e}")
             return error_msg
         except requests.exceptions.Timeout:
-            error_msg = "Error: Request timed out. Llama model may be too slow or overloaded."
+            error_msg = "Error: Request timed out. Consider disabling AI with DISABLE_AI=true"
             logger.error(error_msg)
             return error_msg
         except Exception as e:
@@ -309,8 +310,8 @@ class EnhancedSTIGDataLoader:
         """Legacy method - redirects to enhanced version"""
         return self._create_enhanced_searchable_text(control_id, control_data)
 
-    def search_controls(self, query: str, n_results: int = 5):
-        """Enhanced search with improved relevance scoring"""
+    def search_controls(self, query: str, n_results: int = 5, rhel_version: Optional[str] = None):
+        """Enhanced search with improved relevance scoring and optional version filtering"""
         if not self.data_loaded:
             return []
 
@@ -334,6 +335,13 @@ class EnhancedSTIGDataLoader:
 
         # Score controls with weighted field importance
         for control_id, control_data in self.stig_data.items():
+            # Apply RHEL version filtering if specified
+            if rhel_version:
+                control_version = control_data.get('rhel_version', '').lower()
+                # Handle different version format variations
+                if rhel_version.lower() not in control_version and rhel_version.replace('rhel', '') not in control_version:
+                    continue  # Skip this control if version doesn't match
+            
             score = self._calculate_control_relevance(control_id, control_data, query_lower, query_words)
             if score > 0:
                 control_scores[control_id] = score
@@ -515,39 +523,75 @@ class EnhancedSTIGDataLoader:
 
     def get_enhanced_response(self, query: str, search_results: List[Dict]) -> str:
         """Generate enhanced response using Llama 3.2"""
+        
+        # Check if AI is disabled for performance
+        disable_ai = os.getenv("DISABLE_AI", "false").lower() == "true"
+        if disable_ai:
+            logger.info("AI disabled - using fallback text search only")
+            return self._fallback_response(query, search_results)
+            
         if not ollama_client.is_available():
             logger.warning("Ollama not available, using fallback response")
             return self._fallback_response(query, search_results)
 
-        # Use Llama to re-rank results for better relevance
-        if len(search_results) > 1:
-            search_results = self._llama_rerank_results(query, search_results)
+        # Try AI with aggressive timeouts and fallback
+        try:
+            # Optional: Disable re-ranking for faster performance
+            disable_reranking = os.getenv("DISABLE_LLAMA_RERANKING", "false").lower() == "true"
+            
+            # Use Llama to re-rank results for better relevance (unless disabled)
+            if len(search_results) > 1 and not disable_reranking:
+                try:
+                    search_results = self._llama_rerank_results(query, search_results)
+                except Exception as e:
+                    logger.warning(f"Re-ranking failed, using original order: {e}")
 
-        # Create context from search results
-        context_parts = []
-        for result in search_results:
-            control_id = result['control_id']
-            control_data = result['control_data']
+            # Create context from search results (limit to top 2 for performance)
+            top_results = search_results[:2]  # Reduced from 3 to prevent timeouts
+            context_parts = []
+            for result in top_results:
+                control_id = result['control_id']
+                control_data = result['control_data']
 
-            context_parts.append(f"""
-Control ID: {control_id}
-Title: {control_data.get('title', 'No title')}
-Description: {control_data.get('description', 'No description')}
-Check: {control_data.get('check', 'No check procedure')}
-Fix: {control_data.get('fix', 'No fix procedure')}
-Severity: {control_data.get('severity', 'Unknown')}
-RHEL Version: {control_data.get('rhel_version', 'Unknown')}
+                # Aggressively truncate fields to prevent context overflow
+                title = control_data.get('title', 'No title')[:150]
+                description = control_data.get('description', 'No description')[:300]
+                check = control_data.get('check', 'No check procedure')[:200]
+                fix = control_data.get('fix', 'No fix procedure')[:200]
+
+                context_parts.append(f"""
+Control: {control_id}
+Title: {title}
+Description: {description}
+Check: {check}
+Fix: {fix}
 """)
 
-        context = "\n".join(context_parts)
+            context = "\n".join(context_parts)
 
-        # Generate response using Llama 3.2
-        response = ollama_client.generate_response(query, context)
-        return response
+            # Generate response using Llama with short timeout
+            response = ollama_client.generate_response(query, context)
+            
+            # Check if response indicates timeout/error
+            if "timed out" in response.lower() or "error:" in response.lower():
+                logger.warning("AI response failed, falling back to text search")
+                return self._fallback_response(query, search_results)
+                
+            return response
+            
+        except Exception as e:
+            logger.error(f"AI response completely failed: {e}")
+            return self._fallback_response(query, search_results)
 
     def _llama_rerank_results(self, query: str, search_results: List[Dict]) -> List[Dict]:
         """Use Llama to re-rank search results for better relevance"""
         try:
+            # Skip re-ranking for models that don't handle it well
+            problematic_models = ['phi3:mini', 'tinyllama', 'gemma2:2b']
+            if any(model in self.model.lower() for model in problematic_models):
+                logger.info(f"Skipping re-ranking for model {self.model} (known formatting issues)")
+                return search_results
+            
             # Create a prompt for Llama to evaluate relevance
             controls_summary = []
             for i, result in enumerate(search_results):
@@ -555,22 +599,47 @@ RHEL Version: {control_data.get('rhel_version', 'Unknown')}
                 title = result['control_data'].get('title', 'No title')
                 controls_summary.append(f"{i+1}. {control_id}: {title}")
             
-            rerank_prompt = f"""Given this user question about RHEL STIG compliance: "{query}"
+            rerank_prompt = f"""Rank these STIG controls by relevance to: "{query}"
 
-Here are {len(search_results)} potentially relevant STIG controls:
 {chr(10).join(controls_summary)}
 
-Rank these controls by relevance to the user's question, from most relevant (1) to least relevant ({len(search_results)}). 
-Consider semantic meaning, not just keyword matches.
+IMPORTANT: Respond with ONLY the ranking numbers separated by commas.
+Example: 2,1,4,3,5
 
-Respond with only the ranking numbers separated by commas, like: 2,1,4,3,5"""
+Ranking:"""
 
-            # Get Llama's ranking
-            ranking_response = ollama_client.generate_response(rerank_prompt, "")
+            # Get Llama's ranking with shorter parameters to avoid issues
+            payload = {
+                "model": self.model,
+                "prompt": rerank_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.0,  # Very deterministic
+                    "top_p": 0.1,       # Very focused
+                    "num_predict": 20,   # Very short response
+                    "num_ctx": 512      # Small context
+                }
+            }
             
-            # Parse the ranking
+            response = requests.post(
+                f"{ollama_client.base_url}/api/generate",
+                json=payload,
+                timeout=15  # Short timeout for re-ranking
+            )
+            
+            if response.status_code != 200:
+                logger.warning("Re-ranking request failed, keeping original order")
+                return search_results
+                
+            ranking_response = response.json().get('response', '').strip()
+            
+            # Parse the ranking with better error handling
             try:
-                rankings = [int(x.strip()) for x in ranking_response.split(',')]
+                # Try to extract just the numbers from the response
+                numbers = re.findall(r'\b\d+\b', ranking_response)
+                rankings = [int(x) for x in numbers]
+                
+                # Validate we have the right number of rankings
                 if len(rankings) == len(search_results) and set(rankings) == set(range(1, len(search_results) + 1)):
                     # Reorder results based on Llama's ranking
                     reordered_results = []
@@ -580,32 +649,59 @@ Respond with only the ranking numbers separated by commas, like: 2,1,4,3,5"""
                             # Update score to reflect new ranking
                             result['score'] = len(search_results) - rankings.index(rank)
                             reordered_results.append(result)
-                    logger.info(f"Llama re-ranked {len(search_results)} results for better relevance")
+                    logger.info(f"Successfully re-ranked {len(search_results)} results")
                     return reordered_results
                 else:
-                    logger.warning("Invalid Llama ranking format, keeping original order")
+                    logger.warning(f"Invalid ranking count or range: {rankings}, keeping original order")
                     return search_results
             except (ValueError, IndexError) as e:
-                logger.warning(f"Failed to parse Llama ranking: {e}, keeping original order")
+                logger.warning(f"Failed to parse ranking response '{ranking_response[:50]}...': {e}")
                 return search_results
                 
+        except requests.exceptions.Timeout:
+            logger.warning("Re-ranking timed out, keeping original order")
+            return search_results
         except Exception as e:
-            logger.warning(f"Llama re-ranking failed: {e}, keeping original order")
+            logger.warning(f"Re-ranking failed: {e}, keeping original order")
             return search_results
 
     def _fallback_response(self, query: str, search_results: List[Dict]) -> str:
-        """Fallback response when Llama is not available"""
+        """Enhanced fallback response when Llama is not available"""
         if not search_results:
             return "No relevant STIG controls found for your query."
 
-        response = f"Found {len(search_results)} relevant STIG controls:\n\n"
+        # Check if AI is disabled vs. unavailable
+        disable_ai = os.getenv("DISABLE_AI", "false").lower() == "true"
+        
+        if disable_ai:
+            response = f"Found {len(search_results)} relevant STIG controls for: **{query}**\n\n"
+            response += "*Using enhanced text search (AI disabled for performance)*\n\n"
+        else:
+            response = f"Found {len(search_results)} relevant STIG controls:\n\n"
+        
         for i, result in enumerate(search_results, 1):
             control_id = result['control_id']
             control_data = result['control_data']
             title = control_data.get('title', 'No title')
-            response += f"{i}. **{control_id}**: {title}\n"
+            score = result.get('score', 0)
+            
+            # Add relevance indicator
+            if score >= 50:
+                relevance = "🟢 Highly Relevant"
+            elif score >= 20:
+                relevance = "🟡 Moderately Relevant"  
+            elif score >= 5:
+                relevance = "🔵 Somewhat Relevant"
+            else:
+                relevance = "⚪ Related"
+                
+            response += f"**{i}. {control_id}**: {title} ({relevance})\n"
 
-        response += "\nNote: Llama 3.2 is not available. Click 'View Full Details' for complete implementation guidance."
+        if not disable_ai:
+            response += "\nNote: Llama AI is not available. Click 'View Full Details' for complete implementation guidance."
+        else:
+            response += "\n*💡 Tip: Click 'View Full Details' on any control for complete implementation steps.*"
+            
         return response
 
     def get_control_by_id(self, control_id):
@@ -623,6 +719,13 @@ Respond with only the ranking numbers separated by commas, like: 2,1,4,3,5"""
         auto_load_path = os.getenv("AUTO_LOAD_STIG_PATH")
         data_source = "auto-loaded" if auto_load_path and os.path.exists(auto_load_path) else "uploaded"
         
+        # Get available RHEL versions
+        rhel_versions = set()
+        for control_data in self.stig_data.values():
+            version = control_data.get('rhel_version', '')
+            if version and version.lower() != 'unknown':
+                rhel_versions.add(version)
+        
         return {
             "status": "loaded",
             "total_controls": len(self.stig_data),
@@ -631,7 +734,8 @@ Respond with only the ranking numbers separated by commas, like: 2,1,4,3,5"""
             "ollama_url": OLLAMA_BASE_URL,
             "llama_model": LLAMA_MODEL,
             "data_source": data_source,
-            "auto_load_path": auto_load_path if data_source == "auto-loaded" else None
+            "auto_load_path": auto_load_path if data_source == "auto-loaded" else None,
+            "rhel_versions": sorted(list(rhel_versions))
         }
 
 # Initialize Ollama client
@@ -682,6 +786,10 @@ with open("templates/index.html", "w") as f:
         .no-data { background: #fff3cd; border-left: 5px solid #ffc107; }
         details summary { font-weight: bold; }
         details[open] summary { margin-bottom: 10px; }
+        .form-row { display: flex; gap: 15px; margin: 10px 0; align-items: center; }
+        .form-row .flex-1 { flex: 1; }
+        .form-row .flex-auto { flex: 0 0 200px; }
+        .form-row input, .form-row select { margin: 0; }
     </style>
 </head>
 <body>
@@ -725,7 +833,21 @@ with open("templates/index.html", "w") as f:
             <h3>🔍 Ask STIG Questions (AI-Powered)</h3>
             <form action="/query" method="post">
                 <textarea name="question" rows="3" placeholder="Ask in natural language: How do I configure SSH security? What are the firewall requirements? How do I enable SELinux?" required></textarea>
-                <input type="text" name="stig_id" placeholder="Specific STIG ID (optional)">
+                
+                <div class="form-row">
+                    <div class="flex-1">
+                        <input type="text" name="stig_id" placeholder="Specific STIG ID (optional)">
+                    </div>
+                    <div class="flex-auto">
+                        <label for="rhel_version" style="font-weight: bold; margin-right: 8px;">RHEL Version:</label>
+                        <select name="rhel_version" id="rhel_version">
+                            <option value="">All Versions</option>
+                            <option value="rhel8">RHEL 8</option>
+                            <option value="rhel9">RHEL 9</option>
+                        </select>
+                    </div>
+                </div>
+                
                 <button type="submit">🤖 Get AI-Powered Answer</button>
             </form>
         </div>
@@ -782,6 +904,7 @@ with open("templates/index.html", "w") as f:
                     const controlCount = data.total_controls || 0;
                     const dataSource = data.data_source || 'unknown';
                     const autoLoadPath = data.auto_load_path;
+                    const rhelVersions = data.rhel_versions || [];
                     
                     // Hide status section and upload section
                     status.style.display = 'none';
@@ -791,6 +914,22 @@ with open("templates/index.html", "w") as f:
                     loadedSection.style.display = 'block';
                     querySection.style.display = 'block';
                     exampleQuestions.style.display = 'block';
+                    
+                    // Update RHEL version dropdown with available versions
+                    const versionSelect = document.getElementById('rhel_version');
+                    if (versionSelect && rhelVersions.length > 0) {
+                        // Clear existing options except "All Versions"
+                        versionSelect.innerHTML = '<option value="">All Versions</option>';
+                        
+                        // Add available versions
+                        rhelVersions.forEach(version => {
+                            const option = document.createElement('option');
+                            const displayVersion = version.toLowerCase().includes('rhel') ? version.toUpperCase() : `RHEL ${version.toUpperCase()}`;
+                            option.value = version.toLowerCase();
+                            option.textContent = displayVersion;
+                            versionSelect.appendChild(option);
+                        });
+                    }
                     
                     // Update loaded details based on data source
                     let sourceInfo = '';
@@ -803,10 +942,16 @@ with open("templates/index.html", "w") as f:
                         sourceInfo = `<p><strong>📁 Source:</strong> Uploaded via web interface</p>`;
                     }
                     
+                    let versionInfo = '';
+                    if (rhelVersions.length > 0) {
+                        versionInfo = `<p><strong>🔢 RHEL Versions:</strong> ${rhelVersions.map(v => v.toUpperCase()).join(', ')}</p>`;
+                    }
+                    
                     loadedDetails.innerHTML = `
                         <h4>✅ STIG Data Ready</h4>
                         <p><strong>${controlCount}</strong> STIG controls loaded and indexed</p>
                         ${sourceInfo}
+                        ${versionInfo}
                         <p><strong>🔍 Search:</strong> ${data.search_method || 'Text search with AI enhancement'}</p>
                         <p><em>🤖 Ready for AI-powered STIG questions! Use the form below.</em></p>
                     `;
@@ -857,6 +1002,7 @@ with open("templates/result.html", "w") as f:
         <div class="query-info">
             <strong>Question:</strong> {{ question }}<br>
             {% if stig_id %}<strong>STIG ID:</strong> {{ stig_id }}<br>{% endif %}
+            {% if rhel_version %}<strong>RHEL Version:</strong> {{ rhel_version.upper() }}<br>{% endif %}
         </div>
 
         <div class="result">
@@ -909,12 +1055,13 @@ async def upload_stig_file(stig_file: UploadFile = File(...)):
 def query_form(
     request: Request,
     question: str = Form(...),
-    stig_id: Optional[str] = Form(None)
+    stig_id: Optional[str] = Form(None),
+    rhel_version: Optional[str] = Form(None)
 ):
     if not stig_loader.data_loaded:
         answer = "<div style='background: #fff3cd; padding: 15px; border-radius: 8px;'><h4>⚠️ No Data</h4><p>Please upload STIG JSON data first.</p></div>"
         return templates.TemplateResponse("result.html", {
-            "request": request, "question": question, "stig_id": stig_id, "answer": answer
+            "request": request, "question": question, "stig_id": stig_id, "rhel_version": rhel_version, "answer": answer
         })
 
     if stig_id:
@@ -925,23 +1072,25 @@ def query_form(
         else:
             answer = f"<div style='background: #f8d7da; padding: 15px; border-radius: 8px;'><h4>❌ Not Found</h4><p>STIG control {stig_id} not found.</p></div>"
     else:
-        # Enhanced AI-powered search
-        search_results = stig_loader.search_controls(question, n_results=5)
+        # Enhanced AI-powered search with version filtering
+        search_results = stig_loader.search_controls(question, n_results=5, rhel_version=rhel_version)
         if search_results:
             # Get AI-enhanced response
             ai_response = stig_loader.get_enhanced_response(question, search_results)
-            answer = format_ai_response(question, ai_response, search_results)
+            answer = format_ai_response(question, ai_response, search_results, rhel_version)
         else:
             # No good matches found - provide helpful guidance
+            version_text = f" for RHEL {rhel_version.upper()}" if rhel_version else ""
             answer = f"""<div style='background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 5px solid #ffc107;'>
                 <h4>🔍 No Highly Relevant Controls Found</h4>
-                <p>No STIG controls were found with high relevance to your question: <em>"{question}"</em></p>
+                <p>No STIG controls were found with high relevance to your question{version_text}: <em>"{question}"</em></p>
                 <p><strong>💡 Try these suggestions:</strong></p>
                 <ul>
                     <li>Use more specific technical terms (e.g., "SSH configuration" instead of "remote access")</li>
                     <li>Include RHEL-specific terminology</li>
                     <li>Try different keywords or phrasing</li>
                     <li>Search for a specific STIG ID if you know it</li>
+                    {"<li>Try selecting 'All Versions' to see controls from other RHEL versions</li>" if rhel_version else ""}
                 </ul>
                 <p><strong>Example queries that work well:</strong></p>
                 <ul>
@@ -953,19 +1102,25 @@ def query_form(
             </div>"""
 
     return templates.TemplateResponse("result.html", {
-        "request": request, "question": question, "stig_id": stig_id, "answer": answer
+        "request": request, "question": question, "stig_id": stig_id, "rhel_version": rhel_version, "answer": answer
     })
 
-def format_ai_response(question: str, ai_response: str, search_results: List[Dict]) -> str:
+def format_ai_response(question: str, ai_response: str, search_results: List[Dict], rhel_version: Optional[str] = None) -> str:
     """Format AI response with related controls"""
+
+    # Add version filter info if applicable
+    version_info = ""
+    if rhel_version:
+        version_display = rhel_version.upper() if rhel_version.startswith('rhel') else f"RHEL {rhel_version.upper()}"
+        version_info = f" (filtered for {version_display})"
 
     answer = f"""
     <div style="background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 5px solid #1976d2;">
-        <h4>🤖 AI Analysis</h4>
+        <h4>🤖 AI Analysis{version_info}</h4>
         <div style="white-space: pre-wrap; line-height: 1.6;">{ai_response}</div>
     </div>
 
-    <h4>📋 Most Relevant STIG Controls:</h4>
+    <h4>📋 Most Relevant STIG Controls{version_info}:</h4>
     """
 
     for i, result in enumerate(search_results, 1):
@@ -973,6 +1128,7 @@ def format_ai_response(question: str, ai_response: str, search_results: List[Dic
         control_data = result['control_data']
         title = control_data.get('title', 'No title')
         score = result.get('score', 0)
+        control_version = control_data.get('rhel_version', 'Unknown')
         
         # Create relevance indicator
         if score >= 50:
@@ -999,13 +1155,21 @@ def format_ai_response(question: str, ai_response: str, search_results: List[Dic
             else:
                 description = truncated + "..."
         
+        # Format version display
+        version_display = control_version.upper() if control_version != 'Unknown' else control_version
+        
         answer += f"""
         <div style="background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 3px solid #e53e3e;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <h5 style="margin: 0;">#{i} {control_id}: {title}</h5>
-                <span style="background: {relevance_color}; color: white; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
-                    {relevance_text}
-                </span>
+                <div style="display: flex; gap: 8px;">
+                    <span style="background: {relevance_color}; color: white; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                        {relevance_text}
+                    </span>
+                    <span style="background: #6c757d; color: white; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                        {version_display}
+                    </span>
+                </div>
             </div>
             <p style="margin: 10px 0; color: #666;">{description}</p>
             <div style="margin-top: 15px; padding: 12px; background: #e3f2fd; border-radius: 5px; text-align: center; border: 2px solid #1976d2;">
