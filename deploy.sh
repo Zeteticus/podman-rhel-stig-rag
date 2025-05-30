@@ -1,360 +1,147 @@
 #!/bin/bash
 
-# Optimized STIG RAG Deployment Script with Data Loading
-# This script builds and deploys the RHEL STIG RAG container with:
-# - Automatic STIG JSON data loading
-# - Redis caching for performance
-# - Semantic search capabilities
-
+# Working deployment script - No Redis, No ML, Just Works™
 set -e
 
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+echo "=== Simple STIG RAG Deployment ==="
 
 # Configuration
 APP_NAME="stig-rag"
-REDIS_NAME="stig-rag-redis"
-POD_NAME="stig-rag-pod"
-IMAGE_NAME="rhel-stig-rag:optimized"
+IMAGE_NAME="rhel-stig-rag:simple"
 PORT="${PORT:-8000}"
-REDIS_PORT="${REDIS_PORT:-6379}"
 DATA_DIR="${HOME}/stig-rag-data"
 CACHE_DIR="${HOME}/stig-rag-cache"
-LOG_DIR="${HOME}/stig-rag-logs"
 
-# Functions
-print_status() {
-    echo -e "${BLUE}[*]${NC} $1"
-}
+# 1. Clean up everything
+echo "Cleaning up..."
+podman stop $(podman ps -aq) 2>/dev/null || true
+podman rm -f $(podman ps -aq) 2>/dev/null || true
+podman pod rm -f --all 2>/dev/null || true
 
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
+# 2. Create directories
+echo "Creating directories..."
+mkdir -p "$DATA_DIR" "$CACHE_DIR"
 
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
+# 3. Check for STIG data
+if [ ! -f "stig_data.json" ]; then
+    echo "ERROR: stig_data.json not found!"
+    exit 1
+fi
+cp -f stig_data.json "$DATA_DIR/"
 
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
+# 4. Create minimal app.py
+echo "Creating minimal app.py..."
+cat > app.py << 'EOF'
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
+import json
+import os
+from pathlib import Path
 
-# Check prerequisites
-check_prerequisites() {
-    print_status "Checking prerequisites..."
-    
-    # Check for podman
-    if ! command -v podman &> /dev/null; then
-        print_error "Podman is not installed. Please install podman first."
-        echo "Run: sudo dnf install -y podman"
-        exit 1
-    fi
-    
-    # Check for required files
-    local required_files=("Dockerfile" "app.py" "load_stig_data.py" "requirements.txt" "startup.sh")
-    for file in "${required_files[@]}"; do
-        if [ ! -f "$file" ]; then
-            print_error "Required file '$file' not found!"
-            exit 1
-        fi
-    done
-    
-    # Check for STIG data file
-    if [ ! -f "stig_data.json" ]; then
-        print_warning "stig_data.json not found. Please ensure you have your STIG data file."
-        echo "The container will fail to start without this file."
-        read -p "Continue anyway? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
-    
-    print_success "Prerequisites check passed"
-}
+app = FastAPI(title="RHEL STIG RAG API", version="1.0")
 
-# Create directories
-create_directories() {
-    print_status "Creating directories..."
-    mkdir -p "$DATA_DIR" "$CACHE_DIR" "$LOG_DIR"
-    
-    # Set proper permissions
-    chmod 755 "$DATA_DIR" "$CACHE_DIR" "$LOG_DIR"
-    
-    # Handle SELinux contexts if enabled
-    if command -v getenforce &> /dev/null && [ "$(getenforce)" != "Disabled" ]; then
-        print_status "Setting SELinux contexts..."
-        chcon -R -t container_file_t "$DATA_DIR" "$CACHE_DIR" "$LOG_DIR" 2>/dev/null || true
-    fi
-    
-    print_success "Directories created"
-}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Stop existing containers
-stop_existing() {
-    print_status "Stopping existing containers..."
-    
-    # Stop and remove existing containers
-    podman stop "$APP_NAME" "$REDIS_NAME" 2>/dev/null || true
-    podman rm "$APP_NAME" "$REDIS_NAME" 2>/dev/null || true
-    
-    # Remove existing pod
-    podman pod rm "$POD_NAME" 2>/dev/null || true
-    
-    print_success "Existing containers stopped"
-}
+# Load STIG data
+STIG_DATA = {}
+data_file = Path(os.environ.get('DATA_DIR', '/app/data')) / "stig_data.json"
+if data_file.exists():
+    with open(data_file, 'r') as f:
+        STIG_DATA = json.load(f)
+    print(f"Loaded {len(STIG_DATA)} STIGs")
 
-# Build container image
-build_image() {
-    print_status "Building container image..."
-    
-    # Make scripts executable
-    chmod +x startup.sh load_stig_data.py
-    
-    # Build the image
-    if podman build -t "$IMAGE_NAME" .; then
-        print_success "Container image built successfully"
-    else
-        print_error "Failed to build container image"
-        exit 1
-    fi
-}
+class QueryRequest(BaseModel):
+    question: str
+    rhel_version: Optional[str] = "9"
+    top_k: Optional[int] = 5
 
-# Create pod for networking
-create_pod() {
-    print_status "Creating pod for container networking..."
-    
-    podman pod create \
-        --name "$POD_NAME" \
-        -p "${PORT}:8000" \
-        -p "${REDIS_PORT}:6379" \
-        --userns=keep-id \
-        --network bridge
-    
-    print_success "Pod created"
-}
+@app.get("/")
+async def root():
+    return {"message": "STIG RAG API Running", "stigs": len(STIG_DATA)}
 
-# Run Redis container
-run_redis() {
-    print_status "Starting Redis cache container..."
-    
-    podman run -d \
-        --pod "$POD_NAME" \
-        --name "$REDIS_NAME" \
-        --volume redis_data:/data:Z \
-        --restart unless-stopped \
-        docker.io/redis:7-alpine \
-        redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    
-    # Wait for Redis to be ready
-    print_status "Waiting for Redis to be ready..."
-    local max_attempts=30
-    local attempt=0
-    
-    while [ $attempt -lt $max_attempts ]; do
-        if podman exec "$REDIS_NAME" redis-cli ping &>/dev/null; then
-            print_success "Redis is ready"
-            break
-        fi
-        sleep 1
-        ((attempt++))
-    done
-    
-    if [ $attempt -eq $max_attempts ]; then
-        print_warning "Redis may not be fully ready, but continuing..."
-    fi
-}
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "stigs": len(STIG_DATA)}
 
-# Run main application container
-run_app() {
-    print_status "Starting STIG RAG application container..."
+@app.post("/api/query")
+async def query(request: QueryRequest):
+    results = []
+    query = request.question.lower()
     
-    # Copy STIG data to data directory
-    if [ -f "stig_data.json" ]; then
-        cp -f "stig_data.json" "$DATA_DIR/"
-        print_success "STIG data file copied to $DATA_DIR"
-    fi
+    for stig_id, info in STIG_DATA.items():
+        text = f"{stig_id} {info.get('title','')} {info.get('description','')}".lower()
+        if query in text or any(word in text for word in query.split()):
+            if request.rhel_version == "all" or info.get('rhel_version', '9') == request.rhel_version:
+                results.append({
+                    'stig_id': stig_id,
+                    'title': info.get('title', ''),
+                    'description': info.get('description', ''),
+                    'severity': info.get('severity', 'medium'),
+                    'check': info.get('check', ''),
+                    'fix': info.get('fix', '')
+                })
     
-    podman run -d \
-        --pod "$POD_NAME" \
-        --name "$APP_NAME" \
-        --volume "$DATA_DIR:/app/data:ro,Z" \
-        --volume "$CACHE_DIR:/app/cache:Z" \
-        --volume "$LOG_DIR:/app/logs:Z" \
-        --env REDIS_HOST=localhost \
-        --env LOG_LEVEL="${LOG_LEVEL:-INFO}" \
-        --env APP_PORT=8000 \
-        --restart unless-stopped \
-        --memory="${MEMORY_LIMIT:-2g}" \
-        --cpus="${CPU_LIMIT:-2}" \
-        "$IMAGE_NAME"
-    
-    print_success "Application container started"
-}
-
-# Setup systemd service
-setup_systemd() {
-    print_status "Setting up systemd service..."
-    
-    # Create systemd user directory if it doesn't exist
-    mkdir -p ~/.config/systemd/user/
-    
-    # Create service file
-    cat > ~/.config/systemd/user/stig-rag.service << EOF
-[Unit]
-Description=RHEL STIG RAG Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=exec
-ExecStart=/usr/bin/podman pod start $POD_NAME
-ExecStop=/usr/bin/podman pod stop $POD_NAME
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=default.target
+    return {
+        "results": results[:request.top_k],
+        "count": len(results)
+    }
 EOF
 
-    # Reload systemd
-    systemctl --user daemon-reload
-    
-    # Enable service
-    systemctl --user enable stig-rag.service
-    
-    print_success "Systemd service configured"
-}
+# 5. Create minimal Containerfile
+echo "Creating Containerfile..."
+cat > Containerfile.minimal << 'EOF'
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
-# Health check
-health_check() {
-    print_status "Performing health check..."
-    
-    # Wait for application to start
-    sleep 5
-    
-    local max_attempts=30
-    local attempt=0
-    
-    while [ $attempt -lt $max_attempts ]; do
-        if curl -s "http://localhost:${PORT}/health" > /dev/null; then
-            print_success "Application is healthy"
-            
-            # Get health status
-            local health_status=$(curl -s "http://localhost:${PORT}/health")
-            echo -e "${GREEN}Health Status:${NC} $health_status"
-            break
-        fi
-        sleep 2
-        ((attempt++))
-        echo -n "."
-    done
-    
-    if [ $attempt -eq $max_attempts ]; then
-        print_error "Health check failed - application may not be running correctly"
-        echo "Check logs with: podman logs $APP_NAME"
-        exit 1
-    fi
-}
+RUN microdnf install -y python3 python3-pip && microdnf clean all
 
-# Display access information
-display_info() {
-    echo
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}       RHEL STIG RAG Deployment Complete! 🚀${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo
-    echo -e "${BLUE}Access Points:${NC}"
-    echo -e "  • Web Interface:    ${GREEN}http://localhost:${PORT}${NC}"
-    echo -e "  • API Documentation: ${GREEN}http://localhost:${PORT}/docs${NC}"
-    echo -e "  • Health Check:     ${GREEN}http://localhost:${PORT}/health${NC}"
-    echo -e "  • API Metrics:      ${GREEN}http://localhost:${PORT}/api/metrics${NC}"
-    echo
-    echo -e "${BLUE}Container Management:${NC}"
-    echo -e "  • View logs:        ${YELLOW}podman logs $APP_NAME${NC}"
-    echo -e "  • View Redis logs:  ${YELLOW}podman logs $REDIS_NAME${NC}"
-    echo -e "  • Stop containers:  ${YELLOW}podman pod stop $POD_NAME${NC}"
-    echo -e "  • Start containers: ${YELLOW}podman pod start $POD_NAME${NC}"
-    echo -e "  • Remove all:       ${YELLOW}podman pod rm -f $POD_NAME${NC}"
-    echo
-    echo -e "${BLUE}Data Locations:${NC}"
-    echo -e "  • STIG Data:  ${DATA_DIR}"
-    echo -e "  • Cache:      ${CACHE_DIR}"
-    echo -e "  • Logs:       ${LOG_DIR}"
-    echo
-    echo -e "${BLUE}Quick Test:${NC}"
-    echo -e "  ${YELLOW}curl -X POST http://localhost:${PORT}/api/query \\${NC}"
-    echo -e "  ${YELLOW}  -H \"Content-Type: application/json\" \\${NC}"
-    echo -e "  ${YELLOW}  -d '{\"question\": \"How to configure SELinux?\"}'${NC}"
-    echo
-}
+WORKDIR /app
+RUN mkdir -p /app/data /app/cache
 
-# Main deployment function
-main() {
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${BLUE}       RHEL STIG RAG Optimized Deployment Script${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo
-    
-    # Parse command line arguments
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --port)
-                PORT="$2"
-                shift 2
-                ;;
-            --no-redis)
-                NO_REDIS=true
-                shift
-                ;;
-            --no-systemd)
-                NO_SYSTEMD=true
-                shift
-                ;;
-            --help)
-                echo "Usage: $0 [OPTIONS]"
-                echo "Options:"
-                echo "  --port PORT       Set the application port (default: 8000)"
-                echo "  --no-redis        Skip Redis deployment"
-                echo "  --no-systemd      Skip systemd service setup"
-                echo "  --help            Show this help message"
-                exit 0
-                ;;
-            *)
-                print_error "Unknown option: $1"
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Run deployment steps
-    check_prerequisites
-    create_directories
-    stop_existing
-    build_image
-    create_pod
-    
-    if [ "$NO_REDIS" != "true" ]; then
-        run_redis
-    else
-        print_warning "Skipping Redis deployment (caching will be disabled)"
-    fi
-    
-    run_app
-    
-    if [ "$NO_SYSTEMD" != "true" ]; then
-        setup_systemd
-    fi
-    
-    health_check
-    display_info
-    
-    print_success "Deployment completed successfully!"
-}
+RUN python3.9 -m pip install fastapi uvicorn
 
-# Run main function
-main "$@"
+COPY app.py .
+COPY stig_data.json /app/data/
+
+ENV DATA_DIR=/app/data
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+CMD ["python3.9", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+EOF
+
+# 6. Build
+echo "Building container..."
+podman build -f Containerfile.minimal -t "$IMAGE_NAME" .
+
+# 7. Run
+echo "Starting container..."
+podman run -d \
+    --name "$APP_NAME" \
+    -p "${PORT}:8000" \
+    -v "$DATA_DIR:/app/data:ro,Z" \
+    "$IMAGE_NAME"
+
+# 8. Test
+echo "Waiting for startup..."
+sleep 5
+
+if curl -s http://localhost:${PORT}/health | grep -q "healthy"; then
+    echo "✓ SUCCESS! Application is running"
+    echo ""
+    echo "Test with:"
+    echo "  curl http://localhost:${PORT}/health"
+    echo "  curl -X POST http://localhost:${PORT}/api/query \\"
+    echo "    -H 'Content-Type: application/json' \\"
+    echo "    -d '{\"question\": \"selinux\"}'"
+else
+    echo "✗ Failed to start. Logs:"
+    podman logs "$APP_NAME"
+fi

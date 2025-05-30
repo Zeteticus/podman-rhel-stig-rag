@@ -1,12 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import json
 import os
 from pathlib import Path
 
-app = FastAPI(title="RHEL STIG RAG API", version="1.0")
+app = FastAPI(title="RHEL STIG RAG API", version="1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,8 +31,12 @@ class QueryRequest(BaseModel):
     top_k: Optional[int] = 5
 
 @app.get("/")
-async def root():
-    return {"message": "STIG RAG API Running", "stigs": len(STIG_DATA)}
+async def read_index():
+    """Serve the web interface"""
+    static_file = Path("/app/static/index.html")
+    if static_file.exists():
+        return FileResponse(static_file)
+    return {"message": "Web UI not found. API is running at /docs"}
 
 @app.get("/health")
 async def health():
@@ -58,3 +64,7 @@ async def query(request: QueryRequest):
         "results": results[:request.top_k],
         "count": len(results)
     }
+
+# Mount static files
+if Path("/app/static").exists():
+    app.mount("/static", StaticFiles(directory="/app/static"), name="static")
