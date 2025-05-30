@@ -530,17 +530,7 @@ curl -X POST http://localhost:8000/api/query \
   -H "Content-Type: application/json" \
   -d '{
     "question": "password policy requirements",
-    "rhel_version": "9",
-    "top_k": 10
-  }'
+    "rhel_version": "9", "top_k": 10 }'
 
 # Find similar STIGs
 curl http://localhost:8000/api/search/similar/RHEL-09-211010
-```
-
-This setup will:
-- Load STIG data at container startup
-- Cache embeddings for fast semantic search
-- Use Redis for query result caching
-- Implement connection pooling and async operations
-- Provide sub-second response times for most queries

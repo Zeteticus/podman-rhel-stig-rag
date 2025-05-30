@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RHEL STIG RAG Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            padding: 40px 0;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .main-card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            padding: 30px;
+            margin-bottom: 20px;
+        }
+        
+        .query-form {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        label {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.3s;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        select, input[type="text"] {
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        
+        select:focus, input[type="text"]:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+        
+        .submit-btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .submit-btn:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        }
+        
+        .submit-btn:active {
+            transform: translateY(0);
+        }
+        
+        .submit-btn:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .example-questions {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        .example-questions h3 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        
+        .example-btn {
+            background: #ecf0f1;
+            border: 1px solid #bdc3c7;
+            padding: 8px 16px;
+            margin: 5px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+        
+        .example-btn:hover {
+            background: #3498db;
+            color: white;
+            border-color: #3498db;
+        }
+        
+        .results {
+            margin-top: 30px;
+            display: none;
+        }
+        
+        .result-item {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            transition: all 0.3s;
+        }
+        
+        .result-item:hover {
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            transform: translateY(-2px);
+        }
+        
+        .stig-id {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        
+        .severity {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        
+        .severity-high {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .severity-medium {
+            background: #f39c12;
+            color: white;
+        }
+        
+        .severity-low {
+            background: #27ae60;
+            color: white;
+        }
+        
+        .result-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        
+        .result-section {
+            margin: 15px 0;
+        }
+        
+        .result-section h4 {
+            color: #34495e;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .result-section pre {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .result-section p {
+            line-height: 1.6;
+            color: #555;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error {
+            background: #fee;
+            border: 1px solid #fcc;
+            color: #c33;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .relevance-score {
+            float: right;
+            background: #ecf0f1;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+            color: #7f8c8d;
+        }
+        
+        @media (max-width: 768px) {
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛡️ RHEL STIG RAG Assistant</h1>
+            <p>Intelligent Security Technical Implementation Guide Search</p>
+        </div>
+        
+        <div class="main-card">
+            <form class="query-form" id="queryForm">
+                <div class="form-group">
+                    <label for="question">Ask a STIG Compliance Question:</label>
+                    <textarea 
+                        id="question" 
+                        name="question" 
+                        placeholder="Example: How do I configure SELinux for STIG compliance?"
+                        required
+                    ></textarea>
+                </div>
+                
+                <div class="controls">
+                    <div class="form-group" style="flex: 1;">
+                        <label for="rhel_version">RHEL Version:</label>
+                        <select id="rhel_version" name="rhel_version">
+                            <option value="9" selected>RHEL 9 (Recommended)</option>
+                            <option value="8">RHEL 8 (Legacy)</option>
+                            <option value="all">All Versions</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group" style="flex: 1;">
+                        <label for="stig_id">Specific STIG ID (Optional):</label>
+                        <input 
+                            type="text" 
+                            id="stig_id" 
+                            name="stig_id" 
+                            placeholder="e.g., RHEL-09-211010"
+                        >
+                    </div>
+                    
+                    <button type="submit" class="submit-btn" id="submitBtn">
+                        Search STIGs
+                    </button>
+                </div>
+            </form>
+            
+            <div class="example-questions">
+                <h3>Popular Questions:</h3>
+                <button class="example-btn" onclick="setExample('How do I verify GPG signatures for packages in RHEL 9?')">
+                    GPG Signatures
+                </button>
+                <button class="example-btn" onclick="setExample('What are the SELinux requirements for RHEL compliance?')">
+                    SELinux Requirements
+                </button>
+                <button class="example-btn" onclick="setExample('How do I configure secure boot and UEFI settings?')">
+                    Secure Boot
+                </button>
+                <button class="example-btn" onclick="setExample('What are the password policy requirements for STIG compliance?')">
+                    Password Policy
+                </button>
+                <button class="example-btn" onclick="setExample('How do I enable and configure audit logging?')">
+                    Audit Logging
+                </button>
+            </div>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Searching STIG database...</p>
+            </div>
+            
+            <div class="error" id="error"></div>
+            
+            <div class="results" id="results"></div>
+        </div>
+    </div>
+    
+    <script>
+        function setExample(text) {
+            document.getElementById('question').value = text;
+        }
+        
+        function showError(message) {
+            const errorEl = document.getElementById('error');
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+            setTimeout(() => {
+                errorEl.style.display = 'none';
+            }, 5000);
+        }
+        
+        function formatSeverity(severity) {
+            const severityClass = `severity-${severity.toLowerCase()}`;
+            return `<span class="severity ${severityClass}">${severity.toUpperCase()}</span>`;
+        }
+        
+        function formatResult(result) {
+            const relevancePercent = Math.round(result.relevance_score * 100);
+            
+            return `
+                <div class="result-item">
+                    <div>
+                        <span class="stig-id">${result.stig_id}</span>
+                        ${formatSeverity(result.severity)}
+                        <span class="relevance-score">${relevancePercent}% relevant</span>
+                    </div>
+                    <h3 class="result-title">${result.title}</h3>
+                    
+                    <div class="result-section">
+                        <h4>📋 Description</h4>
+                        <p>${result.description}</p>
+                    </div>
+                    
+                    <div class="result-section">
+                        <h4>🔍 How to Check</h4>
+                        <pre>${result.check}</pre>
+                    </div>
+                    
+                    <div class="result-section">
+                        <h4>🔧 How to Fix</h4>
+                        <pre>${result.fix}</pre>
+                    </div>
+                </div>
+            `;
+        }
+        
+        document.getElementById('queryForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const loadingEl = document.getElementById('loading');
+            const resultsEl = document.getElementById('results');
+            
+            // Get form data
+            const formData = {
+                question: document.getElementById('question').value,
+                rhel_version: document.getElementById('rhel_version').value,
+                stig_id: document.getElementById('stig_id').value || null,
+                top_k: 5
+            };
+            
+            // Show loading state
+            submitBtn.disabled = true;
+            loadingEl.style.display = 'block';
+            resultsEl.style.display = 'none';
+            resultsEl.innerHTML = '';
+            
+            try {
+                const response = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.results && data.results.length > 0) {
+                    resultsEl.innerHTML = `
+                        <h2>Found ${data.count} relevant STIG${data.count > 1 ? 's' : ''}</h2>
+                        ${data.results.map(formatResult).join('')}
+                    `;
+                } else {
+                    resultsEl.innerHTML = `
+                        <div class="result-item">
+                            <p>No matching STIGs found for your query. Try rephrasing your question or selecting a different RHEL version.</p>
+                        </div>
+                    `;
+                }
+                
+                resultsEl.style.display = 'block';
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showError('Failed to search STIGs. Please check your connection and try again.');
+            } finally {
+                submitBtn.disabled = false;
+                loadingEl.style.display = 'none';
+            }
+        });
+        
+        // Auto-resize textarea
+        const textarea = document.getElementById('question');
+        textarea.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = this.scrollHeight + 'px';
+        });
+    </script>
+</body>
+</html>
